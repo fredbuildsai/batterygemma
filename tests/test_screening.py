@@ -44,6 +44,24 @@ def test_comparison_only_title_is_flagged():
     assert rel.in_scope and rel.comparison_only_title
 
 
+def test_unicode_dashes_and_spaces_match_ascii_terms():
+    # Real OpenAlex titles from the pilot, rejected before normalization (U+2010 HYPHEN instead of "-").
+    rel = score_relevance(
+        "A Perspective on the Sustainability of Cathode Materials used in Lithium‐Ion Batteries", None, SCOPE
+    )
+    assert rel.in_scope and rel.tags == ["cathode"]
+
+    sodium = score_relevance(
+        "The Cathode Choice for Commercialization of Sodium‐Ion Batteries",
+        "Compared with lithium‑ion batteries, layered oxides offer lower cost.",
+        SCOPE,
+    )
+    assert sodium.in_scope and sodium.comparison_only_title  # comparison-only now detected too
+
+    en_dash = score_relevance("Cathodes for lithium–ion cells at 4.2 V", None, SCOPE)
+    assert en_dash.in_scope
+
+
 def add(s, doc_id, title, abstract=None, license="CC-BY-4.0", **kw):
     s.add(Document(doc_id=doc_id, source="test", external_id=doc_id, title=title, norm_title=title.lower(),
                    abstract=abstract, license=license, **kw))

@@ -42,6 +42,27 @@ def test_openalex_pages_with_cursor_and_maps_fields():
     assert "mailto" not in requests[0]
 
 
+def test_openalex_splits_limit_across_terms():
+    def work(work_id):
+        return {"id": f"https://openalex.org/{work_id}", "title": f"Paper {work_id}", "best_oa_location": {"license": "cc-by"}}
+
+    pages = {
+        "cathode": [work("C1"), work("C2"), work("C3")],
+        "electrolyte": [work("E1"), work("C1"), work("E2"), work("E3")],  # C1 repeats across queries
+    }
+    requested = []
+
+    def handler(request):
+        term = request.url.params["search"]
+        requested.append((term, request.url.params["per-page"]))
+        return httpx.Response(200, json={"meta": {"next_cursor": None}, "results": pages[term]})
+
+    records = list(OpenAlexSource(client_for(handler), api_key="").discover(["cathode", "electrolyte"], limit=4))
+
+    assert [r.external_id for r in records] == ["C1", "C2", "E1", "E2"]  # 2 per term; duplicate C1 skipped
+    assert requested == [("cathode", "2"), ("electrolyte", "2")]
+
+
 def test_rebuild_abstract_handles_missing_index():
     assert rebuild_abstract(None) is None
 

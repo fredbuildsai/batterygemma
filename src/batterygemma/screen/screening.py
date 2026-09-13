@@ -24,6 +24,15 @@ TITLE_WEIGHT = 2.0
 ABSTRACT_WEIGHT = 1.0
 MAX_SCOPE_POINTS = 3.0
 
+# Publisher metadata often uses typographic dashes and spaces ("Lithium‐Ion", "Li–S", "4.2 V"), which would
+# otherwise never match ASCII scope terms like "lithium-ion" (seen on ~70% of rejected OpenAlex titles/abstracts).
+_UNICODE_DASHES = re.compile("[‐‑‒–—−]")
+_UNICODE_SPACES = re.compile("[    ]")
+
+
+def _normalize(text: str | None) -> str:
+    return _UNICODE_SPACES.sub(" ", _UNICODE_DASHES.sub("-", (text or "").lower()))
+
 
 @dataclass
 class Relevance:
@@ -43,8 +52,8 @@ def _compile(term: str) -> re.Pattern[str]:
 
 
 def score_relevance(title: str, abstract: str | None, scope: dict[str, Any]) -> Relevance:
-    title_text = title.lower()
-    abstract_text = (abstract or "").lower()
+    title_text = _normalize(title)
+    abstract_text = _normalize(abstract)
 
     scope_points = 0.0
     for group in scope["must"]:

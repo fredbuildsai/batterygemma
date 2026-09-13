@@ -31,7 +31,22 @@ sources:
   openalex:
     enabled: true
     filter: "is_oa:true,type:article|preprint|dissertation"
-    terms: ["lithium-ion battery", "lithium battery cathode", "lithium battery anode", "battery electrolyte"]
+    # The discovery limit is split evenly across these terms so each topic contributes.
+    terms:
+      - "lithium-ion battery"
+      - "layered oxide cathode lithium-ion"
+      - "nickel-rich cathode degradation"
+      - "LiFePO4 cathode"
+      - "graphite anode lithium-ion"
+      - "silicon anode lithium-ion"
+      - "lithium metal anode dendrite"
+      - "lithium-ion electrolyte additive"
+      - "solid-state electrolyte lithium"
+      - "solid electrolyte interphase lithium"
+      - "lithium-sulfur battery"
+      - "lithium-ion battery degradation mechanism"
+      - "thermal runaway lithium-ion"
+      - "separator binder lithium-ion battery"
   europepmc:
     enabled: true
     terms: ["lithium-ion battery", "lithium battery"]
