@@ -26,7 +26,7 @@ deployments:
     rpm: 40
     min_max_tokens: 8192  # thinking can consume most of a small budget before the answer is written
     extra_body:
-      chat_template_kwargs: {thinking: true, reasoning_effort: high}
+      chat_template_kwargs: {thinking: true, reasoning_effort: low}  # high effort took ~80s even on trivial prompts
     tags: [strong, json, judge]
 
   - name: nim-llama
