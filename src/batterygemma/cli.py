@@ -14,8 +14,11 @@ from batterygemma.settings import get_settings, load_config
 app = typer.Typer(help="BatteryGemma data pipeline", no_args_is_help=True)
 db_app = typer.Typer(help="Database commands", no_args_is_help=True)
 llm_app = typer.Typer(help="Teacher-LLM router commands", no_args_is_help=True)
+train_app = typer.Typer(help="Training environment commands (M3 training stages are not yet implemented)",
+                        no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(llm_app, name="llm")
+app.add_typer(train_app, name="train")
 console = Console()
 
 
@@ -248,6 +251,20 @@ def parse(
         total += n
         console.print(f"  {doc_id}: {n} chunks")
     console.print(f"Parsed {len(doc_ids)} documents into {total} chunks")
+
+
+@train_app.command("status")
+def train_status() -> None:
+    """Install Unsloth if it's missing, then report package versions and accelerator availability."""
+    from batterygemma.train.environment import UnslothInstallError, ensure_unsloth, environment_report
+
+    try:
+        ensure_unsloth()
+    except UnslothInstallError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    for key, value in environment_report().items():
+        console.print(f"{key:16} {value if value is not None else '[dim]not installed[/dim]'}")
 
 
 if __name__ == "__main__":
