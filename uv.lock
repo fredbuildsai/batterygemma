@@ -180,6 +180,7 @@ dependencies = [
     { name = "rich" },
     { name = "sqlalchemy" },
     { name = "tenacity" },
+    { name = "tokenizers" },
     { name = "typer" },
 ]
 
@@ -219,6 +220,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.7" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "tenacity", specifier = ">=8.3" },
+    { name = "tokenizers", specifier = ">=0.19" },
     { name = "trl", marker = "extra == 'train'" },
     { name = "typer", specifier = ">=0.12" },
     { name = "unsloth", marker = "extra == 'train'" },

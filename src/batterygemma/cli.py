@@ -186,5 +186,42 @@ def fetch(
     console.print(dict(outcomes))
 
 
+@app.command()
+def parse(
+    limit: int = typer.Option(100, help="Maximum fetched documents to parse in this run"),
+    reparse: bool = typer.Option(False, help="Also re-chunk documents that were already chunked"),
+) -> None:
+    """Parse fetched full text (JATS XML, else PDF via Docling) into section-aware, quality-flagged chunks."""
+    from batterygemma.parse.chunk import load_token_counter
+    from batterygemma.parse.pdf_docling import build_converter, parse_pdf
+    from batterygemma.parse.pipeline import parse_and_chunk
+
+    migrate()
+    chunking = load_config("generation")["chunking"]
+    count_tokens = load_token_counter()
+    statuses = ["fetched", "chunked"] if reparse else ["fetched"]
+    with get_session() as s:
+        doc_ids = s.scalars(
+            select(m.Document.doc_id)
+            .where(m.Document.status.in_(statuses), m.Document.files.any())
+            .limit(limit)
+        ).all()
+
+    converter = None
+
+    def pdf_parser(path):  # the Docling converter loads layout models, so build it only if a PDF needs it
+        nonlocal converter
+        converter = converter or build_converter()
+        return parse_pdf(path, converter)
+
+    total = 0
+    for doc_id in doc_ids:
+        with get_session() as s:
+            n = parse_and_chunk(s, s.get(m.Document, doc_id), count_tokens, chunking, pdf_parser=pdf_parser)
+        total += n
+        console.print(f"  {doc_id}: {n} chunks")
+    console.print(f"Parsed {len(doc_ids)} documents into {total} chunks")
+
+
 if __name__ == "__main__":
     app()

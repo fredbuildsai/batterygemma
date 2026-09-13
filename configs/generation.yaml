@@ -4,7 +4,7 @@ chunking:
   max_tokens: 900
   overlap_tokens: 60          # <= ~10% of target
   cpt_target_tokens: 1500
-  max_garble_ratio: 0.05
+  max_garble_ratio: 0.10        # share of tokens in runs of >= 4 single-character tokens (axis soup ~0.7+)
 
 per_chunk:
   qa: {min: 3, max: 6, target: 4}          # scaled by number of extracted facts in the chunk
