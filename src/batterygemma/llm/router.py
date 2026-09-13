@@ -1,17 +1,28 @@
 """Quota-aware teacher-LLM router with automatic failover.
 
 Each task route lists deployments in preference order. For every call the router walks that list and
-skips deployments that are disabled (no API key), paid while paid use is off or over budget, in an
-excluded model family (judge != generator), cooling down after a 429/error, or over their per-minute or
-per-day request limits. Every attempt is recorded in `llm_calls`, which doubles as the daily quota
-ledger and as a response cache keyed by prompt hash.
+skips deployments that are disabled (no API key, auth failure, model not in the subscription tier), paid
+while paid use is off or over budget, in an excluded model family or model (judge != generator), cooling
+down after a 429/error, or over their per-minute or per-day request limits.
+
+Deployments that share a provider budget (e.g. every model in one Mistral workspace) declare the same
+`rate_group`: per-minute windows, per-day counts and rate-limit cooldowns are then shared, so a 429 on one
+model is not immediately retried on a sibling that draws from the same exhausted budget. When every
+candidate is only temporarily blocked, the router waits up to `max_wait_seconds` and retries.
+
+Every attempt is recorded in `llm_calls`, which doubles as the daily quota ledger and as a response cache
+keyed by prompt hash.
+
+When only one provider family is configured, a judge call can opt into `allow_same_family_fallback`: if no
+other family is usable, the router retries with a different model from the same family and marks the result
+`relaxed_family=True` so the weaker independence can be recorded with the judgement.
 """
 
 import hashlib
 import json
 import os
 import time
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,6 +36,9 @@ from batterygemma.db.session import get_session
 Message = dict[str, Any]
 Validator = Callable[[str], Any]
 
+DISABLING_OUTCOMES = {"auth", "unavailable"}
+GROUP_COOLDOWN_OUTCOMES = {"rate_limited", "quota"}
+
 
 class AllDeploymentsExhausted(RuntimeError):
     """No deployment on the route could produce a valid response."""
@@ -37,6 +51,7 @@ class Deployment:
     api_key_env: str
     tier: str = "free"
     family: str = ""
+    rate_group: str | None = None
     rpm: int | None = None
     tpm: int | None = None
     rpd: int | None = None
@@ -47,6 +62,10 @@ class Deployment:
     @property
     def enabled(self) -> bool:
         return bool(os.environ.get(self.api_key_env))
+
+    @property
+    def group(self) -> str:
+        return self.rate_group or self.name
 
     def cost(self, tokens_in: int, tokens_out: int) -> float:
         return (tokens_in * self.cost_per_mtok_in + tokens_out * self.cost_per_mtok_out) / 1_000_000
@@ -60,6 +79,7 @@ class LLMResult:
     model: str
     family: str
     cached: bool = False
+    relaxed_family: bool = False  # judge came from the generator's family (different model) as a fallback
 
 
 def _utc_midnight() -> datetime:
@@ -72,9 +92,11 @@ def _classify_error(exc: Exception) -> str:
     status = getattr(exc, "status_code", None)
     name = type(exc).__name__.lower()
     text = str(exc).lower()
+    if "tier_not_allowed" in text or "not available in your subscription" in text:
+        return "unavailable"
     if status in (401, 403) or "authentication" in name or "permissiondenied" in name:
         return "auth"
-    if status == 429 or "ratelimit" in name:
+    if status == 429 or "ratelimit" in name or '"raw_status_code":429' in text:
         daily_markers = ("per day", "daily", "quota", "requests per day", "rpd", "exceeded your current")
         return "quota" if any(m in text for m in daily_markers) else "rate_limited"
     return "error"
@@ -108,9 +130,12 @@ class LLMRouter:
         self._completion_fn = completion_fn
         self._clock = clock
         self._sleep = sleep
-        self._cooldown_until: dict[str, float] = {}
+        self._cooldown_until: dict[str, float] = {}  # keyed by deployment name or rate group
         self._disabled: set[str] = set()
-        self._recent: dict[str, deque[float]] = {}
+        self._recent: dict[str, deque[float]] = {}  # per rate group request timestamps
+        self._group_members: dict[str, list[str]] = defaultdict(list)
+        for d in self.deployments.values():
+            self._group_members[d.group].append(d.name)
 
     # --- public API ------------------------------------------------------------------------------
 
@@ -120,41 +145,58 @@ class LLMRouter:
         messages: Sequence[Message],
         *,
         exclude_families: Sequence[str] = (),
+        exclude_models: Sequence[str] = (),
+        allow_same_family_fallback: bool = False,
         validate: Validator | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         json_mode: bool = False,
         use_cache: bool = True,
+        max_wait_seconds: float = 120.0,
     ) -> LLMResult:
         """Return the first valid response along the route, failing over as needed.
 
         `validate` receives the raw text and returns the parsed value or raises ValueError, in which
-        case the attempt is logged as invalid_output and the next deployment is tried.
+        case the attempt is logged as invalid_output and the next deployment is tried. When every candidate
+        is only temporarily blocked (per-minute window or rate-limit cooldown), the call waits up to
+        `max_wait_seconds` in total before giving up.
         """
         if route not in self.routes:
             raise KeyError(f"Unknown route: {route}")
         params = {"temperature": temperature, "max_tokens": max_tokens, "json_mode": json_mode}
         prompt_hash = self._hash(route, messages, params)
 
-        if use_cache and (cached := self._cached(prompt_hash, exclude_families, validate)):
-            return cached
+        phases: list[tuple[tuple[str, ...], bool]] = [(tuple(exclude_families), False)]
+        if allow_same_family_fallback and exclude_families:
+            phases.append(((), True))
 
         attempts = 0
-        tried: set[str] = set()
-        while attempts < self.max_attempts:
-            deployment, wait = self._next_deployment(route, exclude_families, tried)
-            if deployment is None:
-                if wait is None:
-                    break
-                self._sleep(wait)
-                continue
-            attempts += 1
-            result = self._attempt(route, deployment, messages, params, prompt_hash, validate)
-            if result is not None:
-                return result
-            tried.add(deployment.name)
+        waited = 0.0
+        for families, relaxed in phases:
+            if use_cache and (cached := self._cached(prompt_hash, families, exclude_models, validate)):
+                cached.relaxed_family = relaxed
+                return cached
+            tried: set[str] = set()
+            phase_attempts = 0
+            while phase_attempts < self.max_attempts:
+                deployment, wait = self._next_deployment(route, families, exclude_models, tried)
+                if deployment is None:
+                    if wait is None or waited + wait > max_wait_seconds:
+                        break
+                    self._sleep(wait)
+                    waited += wait
+                    continue
+                phase_attempts += 1
+                attempts += 1
+                result, outcome = self._attempt(route, deployment, messages, params, prompt_hash, validate)
+                if result is not None:
+                    result.relaxed_family = relaxed
+                    return result
+                if outcome != "rate_limited":  # rate-limited deployments may be retried once they cool down
+                    tried.add(deployment.name)
         raise AllDeploymentsExhausted(
-            f"Route '{route}' exhausted after {attempts} attempts (excluded families: {list(exclude_families)})"
+            f"Route '{route}' exhausted after {attempts} attempts and {waited:.0f}s waiting "
+            f"(excluded families: {list(exclude_families)}, excluded models: {list(exclude_models)})"
         )
 
     def status(self) -> list[dict[str, Any]]:
@@ -168,10 +210,11 @@ class LLMRouter:
                     "model": d.model,
                     "tier": d.tier,
                     "family": d.family,
+                    "rate_group": d.group,
                     "enabled": d.enabled and d.name not in self._disabled,
                     "used_today": used.get(d.name, 0),
                     "rpd": d.rpd,
-                    "cooldown_s": max(0, int(self._cooldown_until.get(d.name, 0) - now)),
+                    "cooldown_s": max(0, int(self._cooldown_remaining(d, now))),
                 }
             )
         return rows
@@ -187,32 +230,41 @@ class LLMRouter:
 
     # --- selection -------------------------------------------------------------------------------
 
+    def _cooldown_remaining(self, d: Deployment, now: float) -> float:
+        until = max(self._cooldown_until.get(d.name, 0.0), self._cooldown_until.get(d.group, 0.0))
+        return until - now
+
     def _next_deployment(
-        self, route: str, exclude_families: Sequence[str], tried: set[str]
+        self, route: str, exclude_families: Sequence[str], exclude_models: Sequence[str], tried: set[str]
     ) -> tuple[Deployment | None, float | None]:
-        """Pick the first usable deployment; if only per-minute limits block, return how long to wait."""
+        """Pick the first usable deployment, or return how long until a temporarily blocked one frees up."""
         now = self._clock()
         used_today = self._requests_today()
         min_wait: float | None = None
+
+        def consider_wait(seconds: float) -> None:
+            nonlocal min_wait
+            min_wait = seconds if min_wait is None else min(min_wait, seconds)
+
         for name in self.routes[route]:
             d = self.deployments[name]
             if name in tried or name in self._disabled or not d.enabled:
                 continue
-            if d.family and d.family in exclude_families:
+            if (d.family and d.family in exclude_families) or d.model in exclude_models:
                 continue
             if d.tier == "paid" and (not self.allow_paid or self.spent_today_usd() >= self.max_usd_per_day):
                 continue
-            if self._cooldown_until.get(name, 0) > now:
+            if d.rpd is not None and sum(used_today.get(m, 0) for m in self._group_members[d.group]) >= d.rpd:
                 continue
-            if d.rpd is not None and used_today.get(name, 0) >= d.rpd:
+            if (remaining := self._cooldown_remaining(d, now)) > 0:
+                consider_wait(remaining)
                 continue
             if d.rpm is not None:
-                window = self._recent.setdefault(name, deque())
+                window = self._recent.setdefault(d.group, deque())
                 while window and now - window[0] >= 60:
                     window.popleft()
                 if len(window) >= d.rpm:
-                    wait = 60 - (now - window[0])
-                    min_wait = wait if min_wait is None else min(min_wait, wait)
+                    consider_wait(60 - (now - window[0]))
                     continue
             return d, None
         return None, min_wait
@@ -236,8 +288,8 @@ class LLMRouter:
         params: dict[str, Any],
         prompt_hash: str,
         validate: Validator | None,
-    ) -> LLMResult | None:
-        self._recent.setdefault(d.name, deque()).append(self._clock())
+    ) -> tuple[LLMResult | None, str]:
+        self._recent.setdefault(d.group, deque()).append(self._clock())
         kwargs: dict[str, Any] = {
             "model": d.model,
             "messages": list(messages),
@@ -255,15 +307,16 @@ class LLMRouter:
         except Exception as exc:  # noqa: BLE001 - provider SDKs raise many types
             outcome = _classify_error(exc)
             latency = int((time.perf_counter() - started) * 1000)
-            if outcome == "auth":
+            if outcome in DISABLING_OUTCOMES:
                 self._disabled.add(d.name)
             else:
                 seconds = {"quota": self.cooldown_quota, "rate_limited": self.cooldown_rate}.get(
                     outcome, self.cooldown_error
                 )
-                self._cooldown_until[d.name] = self._clock() + seconds
+                key = d.group if outcome in GROUP_COOLDOWN_OUTCOMES else d.name
+                self._cooldown_until[key] = self._clock() + seconds
             self._log(route, d, prompt_hash, status=outcome, error=str(exc)[:2000], latency_ms=latency)
-            return None
+            return None, outcome
 
         latency = int((time.perf_counter() - started) * 1000)
         text = response.choices[0].message.content or ""
@@ -279,16 +332,20 @@ class LLMRouter:
                 route, d, prompt_hash, status="invalid_output", error=str(exc)[:2000], latency_ms=latency,
                 tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
             )
-            return None
+            return None, "invalid_output"
 
         self._log(
             route, d, prompt_hash, status="ok", latency_ms=latency, tokens_in=tokens_in,
             tokens_out=tokens_out, cost_usd=cost, response_text=text,
         )
-        return LLMResult(text=text, parsed=parsed, deployment=d.name, model=d.model, family=d.family)
+        return LLMResult(text=text, parsed=parsed, deployment=d.name, model=d.model, family=d.family), "ok"
 
     def _cached(
-        self, prompt_hash: str, exclude_families: Sequence[str], validate: Validator | None
+        self,
+        prompt_hash: str,
+        exclude_families: Sequence[str],
+        exclude_models: Sequence[str],
+        validate: Validator | None,
     ) -> LLMResult | None:
         with get_session(self.engine) as s:
             rows = s.scalars(
@@ -299,7 +356,7 @@ class LLMRouter:
         for row in rows:
             d = self.deployments.get(row.deployment)
             family = d.family if d else ""
-            if family and family in exclude_families:
+            if (family and family in exclude_families) or row.model in exclude_models:
                 continue
             try:
                 parsed = validate(row.response_text or "") if validate else row.response_text

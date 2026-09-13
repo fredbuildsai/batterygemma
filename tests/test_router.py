@@ -124,6 +124,101 @@ def test_invalid_output_retries_on_next_model_and_cache_hits(engine):
     assert calls == ["p/a", "p/b"]  # no new provider call for the cached prompt
 
 
+SINGLE_PROVIDER = {
+    "deployments": [
+        {"name": "gen", "model": "mistral/mistral-medium-latest", "api_key_env": "KEY_A", "family": "mistral"},
+        {"name": "judge", "model": "mistral/magistral-medium-latest", "api_key_env": "KEY_A", "family": "mistral"},
+    ],
+    "routes": {"judge": ["gen", "judge"]},
+}
+
+
+def test_same_family_fallback_uses_a_different_model_and_flags_the_result(engine):
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        return response("5")
+
+    router = LLMRouter(SINGLE_PROVIDER, engine=engine, completion_fn=completion)
+    messages = [{"role": "user", "content": "score this"}]
+    generator = {"exclude_families": ["mistral"], "exclude_models": ["mistral/mistral-medium-latest"]}
+
+    with pytest.raises(AllDeploymentsExhausted):
+        router.complete("judge", messages, **generator)
+
+    result = router.complete("judge", messages, allow_same_family_fallback=True, **generator)
+    assert result.model == "mistral/magistral-medium-latest"
+    assert result.relaxed_family
+    assert calls == ["mistral/magistral-medium-latest"]
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1_000.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+WORKSPACE = {
+    "deployments": [
+        {"name": "small", "model": "mistral/small", "api_key_env": "KEY_A", "family": "mistral", "rate_group": "ws"},
+        {"name": "medium", "model": "mistral/medium", "api_key_env": "KEY_A", "family": "mistral", "rate_group": "ws"},
+    ],
+    "routes": {"qa": ["small", "medium"]},
+    "cooldown": {"rate_limit_seconds": 60},
+}
+
+
+def test_rate_group_shares_cooldown_then_waits_and_retries_same_model(engine):
+    clock = FakeClock()
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if len(calls) == 1:
+            raise RateLimitError('{"message":"Rate limit exceeded","raw_status_code":429}')
+        return response("ok")
+
+    router = LLMRouter(WORKSPACE, engine=engine, completion_fn=completion, clock=clock, sleep=clock.sleep)
+    result = router.complete("qa", [{"role": "user", "content": "hi"}], max_wait_seconds=120)
+
+    # 'medium' shares the workspace budget, so it is not hammered after the 429; the router waits out the
+    # shared cooldown and retries 'small'.
+    assert calls == ["mistral/small", "mistral/small"]
+    assert result.deployment == "small"
+    assert clock.now == pytest.approx(1_060.0)
+
+
+def test_rate_group_gives_up_when_wait_budget_is_too_small(engine):
+    calls = []
+
+    def always_rate_limited(**kw):
+        calls.append(kw["model"])
+        raise RateLimitError("slow down")
+
+    router = LLMRouter(WORKSPACE, engine=engine, completion_fn=always_rate_limited, sleep=lambda _: None)
+    with pytest.raises(AllDeploymentsExhausted):
+        router.complete("qa", [{"role": "user", "content": "hi"}], max_wait_seconds=10)
+    assert calls == ["mistral/small"]  # the sibling in the same rate group is never tried
+
+
+def test_tier_not_allowed_disables_model_and_fails_over(engine):
+    class APIError(Exception):
+        status_code = 403
+
+    tier_error = APIError('{"message":"This model is not available in your subscription tier","type":"tier_not_allowed"}')
+    router, calls = make_router(engine, lambda model, n: tier_error if model == "p/a" else "ok")
+    result = router.complete("qa", [{"role": "user", "content": "hi"}])
+    assert result.deployment == "b"
+    assert statuses(engine)[0] == ("a", "unavailable")
+    assert not router.status()[0]["enabled"]
+
+
 def test_auth_error_disables_deployment(engine):
     router, calls = make_router(engine, lambda model, n: AuthenticationError("bad key") if model == "p/a" else "ok")
     router.complete("qa", [{"role": "user", "content": "hi"}])

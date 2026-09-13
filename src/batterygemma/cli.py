@@ -76,5 +76,115 @@ def llm_test(
     console.print(f"[bold]{result.deployment}[/bold] ({result.model})\n{result.text}")
 
 
+@app.command()
+def discover(
+    source: str = typer.Option("all", help="openalex | chemrxiv | arxiv | all"),
+    limit: int = typer.Option(500, help="Maximum records per source"),
+    from_date: str = typer.Option("2020-01-01", help="arXiv OAI-PMH harvest start date (YYYY-MM-DD)"),
+    batch_size: int = typer.Option(200, help="Records per database commit (progress survives interruption)"),
+) -> None:
+    """Discover candidate papers and store them with cross-source deduplication."""
+    from collections import Counter
+    from itertools import islice
+
+    from batterygemma.sources.arxiv import ArxivOaiSource
+    from batterygemma.sources.base import BlockedByBotProtection, PoliteClient
+    from batterygemma.sources.crossref import CrossrefChemRxivSource
+    from batterygemma.sources.openalex import OpenAlexSource
+    from batterygemma.sources.store import upsert_records
+
+    migrate()
+    email = get_settings().contact_email
+    cfg = load_config("sources")
+    source_cfg = cfg["sources"]
+    builders = {
+        "openalex": lambda: (
+            OpenAlexSource(PoliteClient(contact_email=email, min_interval=0.2), contact_email=email),
+            source_cfg["openalex"]["terms"],
+        ),
+        "chemrxiv": lambda: (
+            CrossrefChemRxivSource(PoliteClient(contact_email=email, min_interval=0.5), contact_email=email),
+            source_cfg["chemrxiv"]["terms"],
+        ),
+        "arxiv": lambda: (
+            ArxivOaiSource(
+                PoliteClient(contact_email=email, min_interval=3.0),  # arXiv asks for >= 3 s between requests
+                sets=source_cfg["arxiv"]["oai_sets"], categories=source_cfg["arxiv"]["categories"],
+                from_date=from_date,
+            ),
+            cfg["scope"]["must"][0],
+        ),
+    }
+    names = list(builders) if source == "all" else [source]
+    if unknown := set(names) - builders.keys():
+        raise typer.BadParameter(f"Unknown source(s): {sorted(unknown)}")
+
+    for name in names:
+        if not source_cfg.get(name, {}).get("enabled", False):
+            console.print(f"{name}: disabled in sources.yaml, skipped")
+            continue
+        adapter, terms = builders[name]()
+        totals: Counter[str] = Counter()
+        records = adapter.discover(terms, limit)
+        try:
+            while batch := list(islice(records, batch_size)):
+                with get_session() as s:
+                    totals += upsert_records(s, batch, allow=cfg["license_allow"], flag=cfg["license_flag"])
+                console.print(f"  {name}: {sum(totals.values())} records stored so far")
+        except BlockedByBotProtection as exc:
+            console.print(f"[yellow]{name}: {exc}. Stopped this source (bot protection is not bypassed).[/yellow]")
+        finally:
+            adapter.client.close()
+        console.print(f"[bold]{name}[/bold]: {dict(totals)}")
+
+
+@app.command()
+def screen(
+    rescreen: bool = typer.Option(False, help="Also re-evaluate documents already accepted or rejected"),
+) -> None:
+    """Apply the license gate and keyword relevance scoring to discovered documents."""
+    from batterygemma.screen.screening import screen_documents
+
+    migrate()
+    with get_session() as s:
+        counts = screen_documents(s, load_config("sources"), rescreen=rescreen)
+    console.print(dict(counts))
+
+
+@app.command()
+def fetch(
+    limit: int = typer.Option(50, help="Maximum accepted documents to fetch in this run"),
+) -> None:
+    """Download full text (Europe PMC XML or licensed PDF) for accepted documents."""
+    from collections import Counter
+
+    from batterygemma.fetch import fetch_document
+    from batterygemma.sources.base import PoliteClient
+
+    migrate()
+    settings = get_settings()
+    cfg = load_config("sources")
+    with get_session() as s:
+        doc_ids = s.scalars(
+            select(m.Document.doc_id)
+            .where(m.Document.status == "accepted", ~m.Document.files.any())
+            .order_by(m.Document.relevance.desc())
+            .limit(limit)
+        ).all()
+    client = PoliteClient(contact_email=settings.contact_email, min_interval=1.0)
+    outcomes: Counter[str] = Counter()
+    try:
+        for doc_id in doc_ids:
+            with get_session() as s:  # one transaction per document so progress survives interruption
+                doc = s.get(m.Document, doc_id)
+                outcome = fetch_document(s, doc, client, settings.raw_dir, allow=cfg["license_allow"],
+                                         flag=cfg["license_flag"])
+            outcomes[outcome] += 1
+            console.print(f"  {doc_id}: {outcome}")
+    finally:
+        client.close()
+    console.print(dict(outcomes))
+
+
 if __name__ == "__main__":
     app()

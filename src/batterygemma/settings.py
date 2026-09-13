@@ -4,6 +4,7 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +28,20 @@ class Settings(BaseSettings):
     contact_email: str = ""
     allow_paid: bool = False
     max_usd_per_day: float = 5.0
+
+    @field_validator("database_url")
+    @classmethod
+    def _anchor_sqlite_path(cls, url: str) -> str:
+        """Resolve a relative SQLite path against the project root, not the shell's working directory."""
+        prefix = "sqlite:///"
+        if url.startswith(prefix) and not Path(url.removeprefix(prefix)).is_absolute():
+            return f"{prefix}{PROJECT_ROOT / url.removeprefix(prefix)}"
+        return url
+
+    @field_validator("data_dir", "configs_dir")
+    @classmethod
+    def _anchor_dir(cls, value: Path) -> Path:
+        return value if value.is_absolute() else PROJECT_ROOT / value
 
     @property
     def raw_dir(self) -> Path:

@@ -14,8 +14,9 @@ scope:
     characterization: ["XRD", "XPS", "EIS", "dQ/dV", "NMR", "TEM", "operando", "in situ"]
   comparison_only: ["sodium-ion", "na-ion", "potassium-ion"]
 
-license_allowlist: ["CC0-1.0", "CC-BY-4.0", "CC-BY-3.0", "CC-BY-2.0", "public-domain"]
-license_flagged: ["CC-BY-SA-4.0"]
+# License families (version-less ids from batterygemma.screen.license). Public HF release => no NC/ND.
+license_allow: ["CC0", "CC-BY", "public-domain"]
+license_flag: ["CC-BY-SA"]
 
 sources:
   chemrxiv:
@@ -24,8 +25,9 @@ sources:
     terms: ["lithium-ion battery", "lithium battery cathode", "battery electrolyte", "solid-state battery", "silicon anode"]
   arxiv:
     enabled: true
+    # OAI-PMH sets (verified via ListSets); records are then filtered locally by category and scope.must terms
+    oai_sets: ["physics:cond-mat:mtrl-sci", "physics:physics:chem-ph", "physics:physics:app-ph"]
     categories: ["cond-mat.mtrl-sci", "physics.chem-ph", "physics.app-ph"]
-    terms: ["lithium-ion battery", "lithium battery", "solid electrolyte"]
   openalex:
     enabled: true
     filter: "is_oa:true,type:article|preprint|dissertation"
