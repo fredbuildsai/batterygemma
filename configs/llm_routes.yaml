@@ -10,8 +10,34 @@
 #   family       model family, used to keep judge != generator family
 #   tags         capabilities: strong, fast, judge, json
 #   cost_per_mtok_in/out  USD per million tokens (paid tier budget accounting)
+#   api_base     override the provider's default endpoint
+#   extra_body   passed through verbatim to the request (e.g. reasoning/thinking controls)
+#   min_max_tokens  floor on the requested max_tokens; useful for reasoning models that spend budget thinking
 
 deployments:
+  # --- NVIDIA (integrate.api.nvidia.com), free tier: primary provider while Mistral (below) is broken ---
+  - name: nvidia-deepseek
+    model: nvidia_nim/deepseek-ai/deepseek-v4-flash-0731
+    api_key_env: NVIDIA_NIM_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    tier: free
+    family: deepseek
+    rate_group: nvidia-workspace  # conservative: NVIDIA's free-tier quota may be shared across models on the key
+    rpm: 40
+    min_max_tokens: 8192  # thinking can consume most of a small budget before the answer is written
+    extra_body:
+      chat_template_kwargs: {thinking: true, reasoning_effort: high}
+    tags: [strong, json, judge]
+
+  - name: nim-llama
+    model: nvidia_nim/meta/llama-3.3-70b-instruct
+    api_key_env: NVIDIA_NIM_API_KEY
+    tier: free
+    family: llama
+    rate_group: nvidia-workspace
+    rpm: 40
+    tags: [fast, json]
+
   # --- Mistral, free Experiment tier: every model shares one workspace budget ------------------------
   - name: mistral-small
     model: mistral/mistral-small-latest
@@ -97,15 +123,17 @@ deployments:
     tags: [strong, json, judge]
 
 # Ordered preference per task. The router tries deployments in order, skipping any that are disabled,
-# cooling down, over quota, or excluded for a judge call. With a single provider, judge calls pass
-# allow_same_family_fallback=True so a different Mistral model grades the generator's output.
+# cooling down, over quota, or excluded for a judge call. NVIDIA (nvidia-deepseek) is listed first while
+# Mistral's free tier is returning 429s on every request; Mistral entries stay in each chain so it resumes
+# automatically once that's resolved. The judge route lists nim-llama (a different family from
+# nvidia-deepseek, both on the same NVIDIA key) so judging stays cross-family even with only NVIDIA working.
 routes:
-  screen:    [mistral-small, mistral-medium]
-  extract:   [mistral-small, mistral-medium]
-  qa:        [mistral-medium, mistral-small]
-  negatives: [mistral-medium, mistral-small]
-  ideation:  [mistral-medium, magistral-medium]
-  judge:     [magistral-medium, mistral-medium]
+  screen:    [nvidia-deepseek, mistral-small, mistral-medium]
+  extract:   [nvidia-deepseek, mistral-small, mistral-medium]
+  qa:        [nvidia-deepseek, mistral-medium, mistral-small]
+  negatives: [nvidia-deepseek, mistral-medium, mistral-small]
+  ideation:  [nvidia-deepseek, mistral-medium, magistral-medium]
+  judge:     [magistral-medium, mistral-medium, nim-llama]
 
 cooldown:
   rate_limit_seconds: 60        # 429 per-minute limits (shared by a rate_group)

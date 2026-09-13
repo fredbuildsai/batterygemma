@@ -17,9 +17,12 @@ class AuthenticationError(Exception):
     status_code = 401
 
 
-def response(text, tokens_in=10, tokens_out=5):
+def response(text, tokens_in=10, tokens_out=5, reasoning=None):
+    message = SimpleNamespace(content=text)
+    if reasoning is not None:
+        message.reasoning_content = reasoning
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=text))],
+        choices=[SimpleNamespace(message=message)],
         usage=SimpleNamespace(prompt_tokens=tokens_in, completion_tokens=tokens_out),
     )
 
@@ -223,3 +226,65 @@ def test_auth_error_disables_deployment(engine):
     router, calls = make_router(engine, lambda model, n: AuthenticationError("bad key") if model == "p/a" else "ok")
     router.complete("qa", [{"role": "user", "content": "hi"}])
     assert not router.status()[0]["enabled"]
+
+
+REASONING_MODEL = {
+    "deployments": [
+        {"name": "nvidia-deepseek", "model": "nvidia_nim/deepseek-ai/deepseek-v4-flash-0731",
+         "api_key_env": "KEY_A", "family": "deepseek", "api_base": "https://integrate.api.nvidia.com/v1",
+         "min_max_tokens": 8192, "extra_body": {"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}}},
+        {"name": "fallback", "model": "p/fallback", "api_key_env": "KEY_B", "family": "llama"},
+    ],
+    "routes": {"qa": ["nvidia-deepseek", "fallback"]},
+}
+
+
+def test_api_base_and_extra_body_and_min_max_tokens_are_forwarded(engine):
+    captured = {}
+
+    def completion(**kw):
+        captured.update(kw)
+        return response("the answer", reasoning="thinking it through")
+
+    router = LLMRouter(REASONING_MODEL, engine=engine, completion_fn=completion)
+    result = router.complete("qa", [{"role": "user", "content": "hi"}], max_tokens=100)
+
+    assert captured["api_base"] == "https://integrate.api.nvidia.com/v1"
+    assert captured["extra_body"] == {"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}}
+    assert captured["max_tokens"] == 8192  # bumped from the caller's 100 up to the deployment's floor
+    assert result.reasoning == "thinking it through"
+    assert result.text == "the answer"
+
+
+def test_reasoning_is_persisted_and_survives_the_cache(engine):
+    router = LLMRouter(REASONING_MODEL, engine=engine, completion_fn=lambda **kw: response("42", reasoning="steps..."))
+    messages = [{"role": "user", "content": "compute"}]
+
+    first = router.complete("qa", messages)
+    assert first.reasoning == "steps..." and not first.cached
+
+    with get_session(engine) as s:
+        row = s.scalars(select(LLMCall).where(LLMCall.status == "ok")).one()
+    assert row.reasoning_text == "steps..."
+
+    second = router.complete("qa", messages)
+    assert second.cached and second.reasoning == "steps..."
+
+
+def test_empty_content_with_reasoning_fails_over_instead_of_caching_blank_answer(engine):
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if kw["model"].startswith("nvidia_nim"):
+            return response("", reasoning="spent the whole budget thinking")
+        return response("a real answer")
+
+    router = LLMRouter(REASONING_MODEL, engine=engine, completion_fn=completion)
+    result = router.complete("qa", [{"role": "user", "content": "hi"}])
+
+    assert result.deployment == "fallback" and result.text == "a real answer"
+    assert statuses(engine) == [("nvidia-deepseek", "invalid_output"), ("fallback", "ok")]
+    with get_session(engine) as s:
+        bad = s.scalars(select(LLMCall).where(LLMCall.status == "invalid_output")).one()
+    assert bad.reasoning_text == "spent the whole budget thinking"

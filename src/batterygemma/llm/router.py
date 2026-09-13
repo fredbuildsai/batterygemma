@@ -16,6 +16,14 @@ keyed by prompt hash.
 When only one provider family is configured, a judge call can opt into `allow_same_family_fallback`: if no
 other family is usable, the router retries with a different model from the same family and marks the result
 `relaxed_family=True` so the weaker independence can be recorded with the judgement.
+
+A deployment can set `api_base` (override the provider's default endpoint) and `extra_body` (passed through
+verbatim to the underlying OpenAI-compatible request, e.g. `{"chat_template_kwargs": {"thinking": true}}` for
+a reasoning model). Such a model may return its chain of thought on a separate `reasoning`/`reasoning_content`
+field instead of `content`; the router captures that into `LLMResult.reasoning` and persists it alongside the
+cached response. If a reasoning model spends its whole token budget thinking and returns empty `content`, that
+counts as `invalid_output` (fails over to the next deployment) rather than being cached as a valid empty
+answer; `min_max_tokens` lets a deployment request a higher floor than the caller's default to reduce that risk.
 """
 
 import hashlib
@@ -58,6 +66,9 @@ class Deployment:
     tags: list[str] = field(default_factory=list)
     cost_per_mtok_in: float = 0.0
     cost_per_mtok_out: float = 0.0
+    api_base: str | None = None  # override the provider's default base URL
+    extra_body: dict[str, Any] = field(default_factory=dict)  # passed through verbatim, e.g. chat_template_kwargs
+    min_max_tokens: int | None = None  # floor on the requested max_tokens, for models that spend budget thinking
 
     @property
     def enabled(self) -> bool:
@@ -78,6 +89,7 @@ class LLMResult:
     deployment: str
     model: str
     family: str
+    reasoning: str | None = None  # the model's thinking/reasoning_content, when the deployment requests it
     cached: bool = False
     relaxed_family: bool = False  # judge came from the generator's family (different model) as a fallback
 
@@ -290,14 +302,19 @@ class LLMRouter:
         validate: Validator | None,
     ) -> tuple[LLMResult | None, str]:
         self._recent.setdefault(d.group, deque()).append(self._clock())
+        max_tokens = max(params["max_tokens"], d.min_max_tokens or 0)
         kwargs: dict[str, Any] = {
             "model": d.model,
             "messages": list(messages),
             "temperature": params["temperature"],
-            "max_tokens": params["max_tokens"],
+            "max_tokens": max_tokens,
             "api_key": os.environ.get(d.api_key_env),
             "timeout": 180,
         }
+        if d.api_base:
+            kwargs["api_base"] = d.api_base
+        if d.extra_body:
+            kwargs["extra_body"] = d.extra_body
         if params["json_mode"]:
             kwargs["response_format"] = {"type": "json_object"}
 
@@ -319,26 +336,43 @@ class LLMRouter:
             return None, outcome
 
         latency = int((time.perf_counter() - started) * 1000)
-        text = response.choices[0].message.content or ""
+        message = response.choices[0].message
+        text = message.content or ""
+        # Reasoning models (e.g. NVIDIA-hosted DeepSeek with chat_template_kwargs.thinking) return their
+        # chain of thought on a separate field rather than in `content`; the field name varies by provider.
+        reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None) or None
         usage = getattr(response, "usage", None)
         tokens_in = getattr(usage, "prompt_tokens", 0) or 0
         tokens_out = getattr(usage, "completion_tokens", 0) or 0
         cost = d.cost(tokens_in, tokens_out) if d.tier == "paid" else 0.0
+
+        if not text.strip():
+            # A reasoning model can spend its whole max_tokens budget on `reasoning` and return no answer;
+            # that is not a usable response, so fail over rather than caching an empty string as "ok".
+            detail = "empty content (reasoning present)" if reasoning else "empty content"
+            self._log(
+                route, d, prompt_hash, status="invalid_output", error=detail, latency_ms=latency,
+                tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost, reasoning_text=reasoning,
+            )
+            return None, "invalid_output"
 
         try:
             parsed = validate(text) if validate else text
         except ValueError as exc:
             self._log(
                 route, d, prompt_hash, status="invalid_output", error=str(exc)[:2000], latency_ms=latency,
-                tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
+                tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost, reasoning_text=reasoning,
             )
             return None, "invalid_output"
 
         self._log(
             route, d, prompt_hash, status="ok", latency_ms=latency, tokens_in=tokens_in,
-            tokens_out=tokens_out, cost_usd=cost, response_text=text,
+            tokens_out=tokens_out, cost_usd=cost, response_text=text, reasoning_text=reasoning,
         )
-        return LLMResult(text=text, parsed=parsed, deployment=d.name, model=d.model, family=d.family), "ok"
+        return (
+            LLMResult(text=text, parsed=parsed, deployment=d.name, model=d.model, family=d.family, reasoning=reasoning),
+            "ok",
+        )
 
     def _cached(
         self,
@@ -364,7 +398,7 @@ class LLMRouter:
                 continue
             return LLMResult(
                 text=row.response_text or "", parsed=parsed, deployment=row.deployment, model=row.model,
-                family=family, cached=True,
+                family=family, reasoning=row.reasoning_text, cached=True,
             )
         return None
 

@@ -233,6 +233,7 @@ class LLMCall(Base):
     status: Mapped[str] = mapped_column(String(16))  # ok | rate_limited | quota | error | invalid_output
     error: Mapped[str | None] = mapped_column(Text)
     response_text: Mapped[str | None] = mapped_column(Text)  # cached output for status == ok
+    reasoning_text: Mapped[str | None] = mapped_column(Text)  # cached thinking/reasoning_content, if the model returned any
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
