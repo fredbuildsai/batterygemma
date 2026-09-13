@@ -296,6 +296,161 @@ def annotate(
     console.print(dict(outcomes))
 
 
+def _pending_chunk_ids(engine, task_type: str, limit: int, force: bool) -> list[str]:
+    with get_session(engine) as s:
+        done_keys = set() if force else {
+            row for row in s.scalars(
+                select(m.GenTask.key).where(m.GenTask.task_type == task_type, m.GenTask.status == "done")
+            )
+        }
+        chunk_ids = s.scalars(
+            select(m.Chunk.chunk_id)
+            .join(m.Document, m.Chunk.doc_id == m.Document.doc_id)
+            .where(m.Document.status == "chunked")
+            .order_by(m.Chunk.doc_id, m.Chunk.order)
+            .limit(limit + len(done_keys))
+        ).all()
+    return [c for c in chunk_ids if force or f"{task_type}:{c}" not in done_keys][:limit]
+
+
+@app.command()
+def generate(
+    kind: str = typer.Argument(..., help="qa | negatives | dpo | ideation"),
+    limit: int = typer.Option(50, help="Maximum chunks (or QA rows, for dpo) to process in this run"),
+    force: bool = typer.Option(False, help="Re-generate items already done, bypassing the response cache"),
+) -> None:
+    """Stage 8: generate Q&A, negatives, DPO pairs or ideation from stage 7's chunks/facts."""
+    from collections import Counter
+
+    from batterygemma.generate.dpo import annotate_qa_dpo
+    from batterygemma.generate.ideation import annotate_chunk_ideation
+    from batterygemma.generate.negatives import annotate_chunk_false_premise, derive_contradiction_negatives
+    from batterygemma.generate.qa import annotate_chunk_qa
+
+    if kind not in ("qa", "negatives", "dpo", "ideation"):
+        raise typer.BadParameter("kind must be one of ['qa', 'negatives', 'dpo', 'ideation']", param_hint="kind")
+
+    migrate()
+    router = build_router()
+    engine = get_engine()
+    outcomes: Counter[str] = Counter()
+
+    if kind == "qa":
+        for chunk_id in _pending_chunk_ids(engine, "generate_qa", limit, force):
+            outcome = annotate_chunk_qa(engine, router, chunk_id, force=force)
+            outcomes[outcome] += 1
+            console.print(f"  {chunk_id}: {outcome}")
+
+    elif kind == "ideation":
+        for chunk_id in _pending_chunk_ids(engine, "generate_ideation", limit, force):
+            outcome = annotate_chunk_ideation(engine, router, chunk_id, force=force)
+            outcomes[outcome] += 1
+            console.print(f"  {chunk_id}: {outcome}")
+
+    elif kind == "negatives":
+        with get_session(engine) as s:
+            doc_ids = s.scalars(select(m.Document.doc_id).where(m.Document.status == "chunked")).all()
+        for doc_id in doc_ids:  # cheap and idempotent (delete-then-insert): safe to re-run over every document
+            with get_session(engine) as s:
+                derived = derive_contradiction_negatives(s, doc_id)
+            outcomes["contradiction_derived"] += len(derived)
+        for chunk_id in _pending_chunk_ids(engine, "generate_false_premise", limit, force):
+            outcome = annotate_chunk_false_premise(engine, router, chunk_id, force=force)
+            outcomes[outcome] += 1
+            console.print(f"  {chunk_id}: {outcome}")
+
+    elif kind == "dpo":
+        with get_session(engine) as s:
+            done_keys = set() if force else {
+                row for row in s.scalars(
+                    select(m.GenTask.key).where(m.GenTask.task_type == "generate_dpo", m.GenTask.status == "done")
+                )
+            }
+            qa_ids = s.scalars(
+                select(m.QA.id).where(m.QA.status == "accepted")  # judged and passed - see export module docstring
+                .order_by(m.QA.id).limit(limit + len(done_keys))
+            ).all()
+        pending = [q for q in qa_ids if force or f"generate_dpo:{q}" not in done_keys][:limit]
+        for qa_id in pending:
+            outcome = annotate_qa_dpo(engine, router, qa_id, force=force)
+            outcomes[outcome] += 1
+            console.print(f"  {qa_id}: {outcome}")
+
+    console.print(dict(outcomes))
+
+
+@app.command()
+def judge(
+    kind: str = typer.Argument(..., help="qa | ideation"),
+    limit: int = typer.Option(50, help="Maximum rows to judge in this run"),
+    force: bool = typer.Option(False, help="Re-judge rows already done, bypassing the response cache"),
+) -> None:
+    """Stage 9: score generated Q&A or ideation with a judge model (different family from the generator)."""
+    from collections import Counter
+
+    from batterygemma.verify.judge import judge_one_ideation, judge_one_qa
+
+    if kind not in ("qa", "ideation"):
+        raise typer.BadParameter("kind must be one of ['qa', 'ideation']", param_hint="kind")
+
+    migrate()
+    router = build_router()
+    engine = get_engine()
+    model_cls, task_type, runner = {
+        "qa": (m.QA, "judge_qa", judge_one_qa),
+        "ideation": (m.Ideation, "judge_ideation", judge_one_ideation),
+    }[kind]
+
+    with get_session(engine) as s:
+        done_keys = set() if force else {
+            row for row in s.scalars(
+                select(m.GenTask.key).where(m.GenTask.task_type == task_type, m.GenTask.status == "done")
+            )
+        }
+        row_ids = s.scalars(
+            select(model_cls.id).where(model_cls.status == "generated")
+            .order_by(model_cls.id).limit(limit + len(done_keys))
+        ).all()
+    pending = [r for r in row_ids if force or f"{task_type}:{r}" not in done_keys][:limit]
+
+    outcomes: Counter[str] = Counter()
+    for row_id in pending:
+        outcome = runner(engine, router, row_id, force=force)
+        outcomes[outcome] += 1
+        console.print(f"  {row_id}: {outcome}")
+    console.print(dict(outcomes))
+
+
+@app.command()
+def export(
+    version: str = typer.Option(..., help="Release version tag, e.g. v0.1"),
+    output: Path | None = typer.Option(None, help="Output directory (default: data/export/<version>)"),
+) -> None:
+    """Stage 9: assign train/eval splits, dedupe, then export CPT/SFT/DPO JSONL for `bg train`."""
+    from batterygemma.export.unsloth_jsonl import export_all
+    from batterygemma.verify.dedupe import mark_duplicates
+    from batterygemma.verify.split import assign_document_splits
+
+    migrate()
+    settings = get_settings()
+    output_dir = output or (settings.export_dir / version)
+
+    with get_session() as s:
+        split_counts = assign_document_splits(s)
+    console.print(f"newly split documents: {split_counts}")
+
+    with get_session() as s:
+        n = mark_duplicates(s, m.QA, bucket_columns=("question_type", "component"),
+                            text_fn=lambda row: row.turns[0]["content"], status_filter="accepted")
+    console.print(f"near-duplicate QA rows rejected: {n}")
+
+    with get_session() as s:
+        result = export_all(s, output_dir)
+    for stage_name, counts in result.items():
+        console.print(f"{stage_name}: {counts}")
+    console.print(f"exported to {output_dir}")
+
+
 @train_app.command("status")
 def train_status() -> None:
     """Install Unsloth if it's missing, then report package versions and accelerator availability."""

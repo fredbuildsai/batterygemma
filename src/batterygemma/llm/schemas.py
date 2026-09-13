@@ -24,6 +24,15 @@ Polarity = Literal["positive", "negative", "uncertain"]
 ComparisonDirection = Literal["improves", "unchanged", "worsens"]
 ClaimCategory = Literal["paraphrase", "contradiction"]
 ClaimSubset = Literal["swap", "numeric", "mechanism", "entity"]
+QuestionType = Literal[
+    "mechanism", "structure_property", "trade_off", "characterization_interpretation", "synthesis_processing",
+    "failure_analysis", "quantitative", "safety_cost", "comparison", "other",
+]
+AnswerType = Literal["OPEN", "CLOSED"]
+DpoErrorType = Literal[
+    "wrong_mechanism", "wrong_magnitude_or_units", "ignored_tradeoff", "fabricated_evidence", "overclaiming",
+    "thermodynamically_impossible",
+]
 
 
 def _non_empty(value: str) -> str:
@@ -94,6 +103,77 @@ class ClaimPairOut(BaseModel):
 
 class ClaimPairsOut(BaseModel):
     pairs: list[ClaimPairOut] = Field(default_factory=list)
+
+
+class QAItemOut(BaseModel):
+    question: str
+    answer: str
+    reasoning: str
+    question_type: QuestionType
+    answer_type: AnswerType
+    component: Component | None = None
+    chemistry: str | None = None
+
+    _check = field_validator("question", "answer", "reasoning")(_non_empty)
+
+
+class QAGenerationOut(BaseModel):
+    items: list[QAItemOut] = Field(default_factory=list)
+
+
+class FalsePremiseOut(BaseModel):
+    """All fields None/absent means "this excerpt has nothing specific enough to build a false premise from"."""
+
+    prompt: str | None = None
+    flawed_element: str | None = None
+    expert_response: str | None = None
+    reasoning: str | None = None
+
+    @field_validator("prompt", "flawed_element", "expert_response", "reasoning")
+    @classmethod
+    def _empty_string_becomes_none(cls, v: str | None) -> str | None:
+        return v.strip() or None if isinstance(v, str) else v
+
+
+class DPORejectionOut(BaseModel):
+    rejected: str
+    error_type: DpoErrorType
+
+    _check = field_validator("rejected")(_non_empty)
+
+
+class IdeaOut(BaseModel):
+    hypothesis: str
+    mechanism: str
+    risks: str
+    validation_experiments: list[str] = Field(default_factory=list)
+    success_metrics: list[str] = Field(default_factory=list)
+
+    _check = field_validator("hypothesis", "mechanism", "risks")(_non_empty)
+
+
+class IdeationOut(BaseModel):
+    problem: str
+    constraints: list[str] = Field(default_factory=list)
+    reasoning: str
+    ideas: list[IdeaOut] = Field(default_factory=list)
+
+    _check = field_validator("problem", "reasoning")(_non_empty)
+
+
+class QAJudgeOut(BaseModel):
+    faithfulness: int = Field(ge=1, le=5)
+    correctness: int = Field(ge=1, le=5)
+    specificity: int = Field(ge=1, le=5)
+    rationale: str = ""
+
+
+class IdeationJudgeOut(BaseModel):
+    groundedness: int = Field(ge=1, le=5)
+    correctness: int = Field(ge=1, le=5)
+    novelty: int = Field(ge=1, le=5)
+    feasibility: int = Field(ge=1, le=5)
+    rationale: str = ""
 
 
 def json_validator(model_cls: type[ModelT]) -> Callable[[str], ModelT]:

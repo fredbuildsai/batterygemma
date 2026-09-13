@@ -1,6 +1,16 @@
 import pytest
 
-from batterygemma.llm.schemas import ClaimPairsOut, ExtractionOut, json_validator
+from batterygemma.llm.schemas import (
+    ClaimPairsOut,
+    DPORejectionOut,
+    ExtractionOut,
+    FalsePremiseOut,
+    IdeationJudgeOut,
+    IdeationOut,
+    QAGenerationOut,
+    QAJudgeOut,
+    json_validator,
+)
 
 VALID_EXTRACTION = {
     "facts": [
@@ -88,3 +98,73 @@ class TestJsonValidator:
     def test_schema_mismatch_raises_value_error(self):
         with pytest.raises(ValueError, match="ExtractionOut"):
             json_validator(ExtractionOut)('{"facts": [{"property": "x"}], "comparisons": []}')  # missing material
+
+
+VALID_QA_ITEM = {
+    "question": "Why does capacity fade accelerate above 4.2 V in NMC811?",
+    "answer": "The H2->H3 transition above 4.2 V causes anisotropic strain that opens intergranular cracks.",
+    "reasoning": "H2->H3 above ~4.2V -> c-axis collapse -> strain at grain boundaries -> cracks -> impedance rise.",
+    "question_type": "mechanism", "answer_type": "OPEN", "component": "cathode", "chemistry": "NMC811",
+}
+
+
+def test_qa_generation_parses_and_defaults_to_empty():
+    result = QAGenerationOut.model_validate({"items": [VALID_QA_ITEM]})
+    assert result.items[0].question_type == "mechanism"
+    assert QAGenerationOut.model_validate({}).items == []
+
+
+def test_qa_item_rejects_unknown_question_type():
+    bad = {**VALID_QA_ITEM, "question_type": "not-a-real-type"}
+    with pytest.raises(ValueError):
+        QAGenerationOut.model_validate({"items": [bad]})
+
+
+def test_false_premise_parses():
+    result = FalsePremiseOut.model_validate({
+        "prompt": "Why does raising LFP's cutoff to 4.5V give much higher capacity?",
+        "flawed_element": "LFP has no further redox above its plateau; extra voltage doesn't add capacity.",
+        "expert_response": "That premise is false: LFP's ~170 mAh/g capacity is set by one Li per formula unit.",
+        "reasoning": "LiFePO4 stores charge on a flat two-phase plateau near 3.45 V.",
+    })
+    assert "false" in result.expert_response.lower()
+
+
+def test_false_premise_treats_null_or_empty_as_nothing_found():
+    result = FalsePremiseOut.model_validate({"prompt": None, "flawed_element": "", "expert_response": None, "reasoning": None})
+    assert result.prompt is None and result.flawed_element is None
+
+
+def test_dpo_rejection_parses_and_rejects_unknown_error_type():
+    good = DPORejectionOut.model_validate({"rejected": "HF forms at the anode.", "error_type": "wrong_mechanism"})
+    assert good.error_type == "wrong_mechanism"
+    with pytest.raises(ValueError):
+        DPORejectionOut.model_validate({"rejected": "x", "error_type": "not_a_real_error"})
+
+
+def test_ideation_parses_ideas_list():
+    result = IdeationOut.model_validate({
+        "problem": "Si-rich anodes fade quickly due to ~300% volume change fracturing the SEI.",
+        "constraints": ["aqueous slurry compatible"],
+        "reasoning": "A more elastic, LiF-rich SEI should tolerate repeated fracture better.",
+        "ideas": [{
+            "hypothesis": "A crosslinked PAA/CMC binder plus FEC-rich electrolyte keeps particles connected.",
+            "mechanism": "Crosslinked binder network absorbs strain; FEC forms a thin, elastic SEI.",
+            "risks": "Binder swelling could increase impedance.",
+            "validation_experiments": ["300-cycle retention vs baseline binder"],
+            "success_metrics": [">=80% retention at 300 cycles"],
+        }],
+    })
+    assert len(result.ideas) == 1 and result.ideas[0].validation_experiments
+
+
+def test_qa_judge_rejects_out_of_range_scores():
+    QAJudgeOut.model_validate({"faithfulness": 5, "correctness": 4, "specificity": 3})
+    with pytest.raises(ValueError):
+        QAJudgeOut.model_validate({"faithfulness": 6, "correctness": 4, "specificity": 3})
+
+
+def test_ideation_judge_rejects_out_of_range_scores():
+    IdeationJudgeOut.model_validate({"groundedness": 5, "correctness": 4, "novelty": 3, "feasibility": 4})
+    with pytest.raises(ValueError):
+        IdeationJudgeOut.model_validate({"groundedness": 0, "correctness": 4, "novelty": 3, "feasibility": 4})
