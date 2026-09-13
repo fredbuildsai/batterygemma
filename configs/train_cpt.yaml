@@ -1,0 +1,22 @@
+# Continued-pretraining LoRA config. Trained via Unsloth's MLX backend (Apple Silicon) - see
+# src/batterygemma/train/sft.py module docstring for what is and isn't supported on this backend.
+model_name: mlx-community/gemma-4-e2b-it-4bit   # already cached locally; see `bg train status`
+max_seq_length: 2048
+
+lora:
+  r: 16
+  lora_alpha: 16
+  lora_dropout: 0
+  finetune_language_layers: true
+  finetune_attention_modules: true
+  finetune_mlp_modules: true
+
+# Passed to unsloth.MLXTrainingConfig. Keys here mirror TRL's SFTConfig field names.
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_steps: 200
+  learning_rate: 0.0001
+  warmup_steps: 10
+  logging_steps: 5
+  save_steps: 0

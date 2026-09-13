@@ -10,22 +10,34 @@ from batterygemma.db.models import Base
 from batterygemma.settings import get_settings
 
 
+def register_sqlite_pragmas(engine: Engine) -> Engine:
+    """Apply this project's required SQLite settings to any engine (used by get_engine() and by tests).
+
+    A caller can hold an open write transaction on one session (e.g. building Fact/Comparison rows) while
+    code it calls opens a second, independent session on the same engine (e.g. the LLM router logging to
+    llm_calls) - two concurrent SQLite writers otherwise fail immediately with "database is locked" rather
+    than waiting. 30s comfortably covers a slow request+commit.
+    """
+    if engine.dialect.name != "sqlite":
+        return engine
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
+    return engine
+
+
 @lru_cache
 def get_engine(database_url: str | None = None) -> Engine:
     url = database_url or get_settings().database_url
     if url.startswith("sqlite:///"):
         Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(url, future=True)
-    if engine.dialect.name == "sqlite":
-
-        @event.listens_for(engine, "connect")
-        def _sqlite_pragmas(dbapi_connection, _record):  # noqa: ANN001
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-    return engine
+    return register_sqlite_pragmas(create_engine(url, future=True))
 
 
 def init_db(engine: Engine | None = None) -> None:

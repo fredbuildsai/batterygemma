@@ -1,0 +1,24 @@
+# SFT LoRA config. Trained via Unsloth's MLX backend (Apple Silicon) - see
+# src/batterygemma/train/sft.py module docstring for what is and isn't supported on this backend.
+model_name: mlx-community/gemma-4-e2b-it-4bit   # already cached locally; see `bg train status`
+max_seq_length: 2048
+chat_template: gemma-4   # plain (non-thinking) template - see module docstring for why
+
+lora:
+  r: 16
+  lora_alpha: 16
+  lora_dropout: 0
+  finetune_language_layers: true
+  finetune_attention_modules: true
+  finetune_mlp_modules: true
+
+# Passed to unsloth.MLXTrainingConfig. assistant_only_loss masks the loss to assistant turns only
+# (this backend's equivalent of CUDA-Unsloth's train_on_responses_only).
+training:
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  max_steps: 300
+  learning_rate: 0.0002
+  warmup_steps: 10
+  logging_steps: 5
+  save_steps: 0

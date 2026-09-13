@@ -7,14 +7,14 @@ from sqlalchemy import func, select
 
 from batterygemma.db import get_session
 from batterygemma.db import models as m
-from batterygemma.db.session import migrate
+from batterygemma.db.session import get_engine, migrate
 from batterygemma.llm import AllDeploymentsExhausted, LLMRouter
 from batterygemma.settings import get_settings, load_config
 
 app = typer.Typer(help="BatteryGemma data pipeline", no_args_is_help=True)
 db_app = typer.Typer(help="Database commands", no_args_is_help=True)
 llm_app = typer.Typer(help="Teacher-LLM router commands", no_args_is_help=True)
-train_app = typer.Typer(help="Training environment commands (M3 training stages are not yet implemented)",
+train_app = typer.Typer(help="Training commands (CPT/SFT via Unsloth's MLX backend; DPO not supported there)",
                         no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(llm_app, name="llm")
@@ -253,6 +253,49 @@ def parse(
     console.print(f"Parsed {len(doc_ids)} documents into {total} chunks")
 
 
+@app.command()
+def annotate(
+    kind: str = typer.Argument(..., help="facts | claims"),
+    limit: int = typer.Option(50, help="Maximum chunks to annotate in this run"),
+    force: bool = typer.Option(False, help="Re-annotate chunks already done, bypassing the response cache"),
+) -> None:
+    """Stage 7: extract facts/comparisons (kind=facts) or claim pairs (kind=claims) from chunks via the LLM."""
+    from collections import Counter
+
+    from batterygemma.annotate.facts import annotate_chunk_facts
+    from batterygemma.annotate.claim_pairs import annotate_chunk_claims
+
+    runners = {"facts": annotate_chunk_facts, "claims": annotate_chunk_claims}
+    if kind not in runners:
+        raise typer.BadParameter(f"kind must be one of {sorted(runners)}", param_hint="kind")
+    task_type = {"facts": "extract_facts", "claims": "extract_claims"}[kind]
+
+    migrate()
+    router = build_router()
+    engine = get_engine()
+    with get_session(engine) as s:
+        done_keys = {
+            row for row in s.scalars(
+                select(m.GenTask.key).where(m.GenTask.task_type == task_type, m.GenTask.status == "done")
+            )
+        } if not force else set()
+        chunk_ids = s.scalars(
+            select(m.Chunk.chunk_id)
+            .join(m.Document, m.Chunk.doc_id == m.Document.doc_id)
+            .where(m.Document.status == "chunked")
+            .order_by(m.Chunk.doc_id, m.Chunk.order)
+            .limit(limit + len(done_keys))
+        ).all()
+    pending = [c for c in chunk_ids if force or f"{task_type}:{c}" not in done_keys][:limit]
+
+    outcomes: Counter[str] = Counter()
+    for chunk_id in pending:
+        outcome = runners[kind](engine, router, chunk_id, force=force)
+        outcomes[outcome] += 1
+        console.print(f"  {chunk_id}: {outcome}")
+    console.print(dict(outcomes))
+
+
 @train_app.command("status")
 def train_status() -> None:
     """Install Unsloth if it's missing, then report package versions and accelerator availability."""
@@ -265,6 +308,46 @@ def train_status() -> None:
         raise typer.Exit(1) from exc
     for key, value in environment_report().items():
         console.print(f"{key:16} {value if value is not None else '[dim]not installed[/dim]'}")
+
+
+def _run_training(stage: str, dataset: Path, output: Path, config: str) -> None:
+    from batterygemma.train.environment import UnslothInstallError, ensure_unsloth
+    from batterygemma.train.sft import run_cpt, run_sft
+
+    try:
+        ensure_unsloth()
+    except UnslothInstallError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    cfg = load_config(config)
+    runner = {"cpt": run_cpt, "sft": run_sft}[stage]
+    result = runner(dataset, output, cfg)
+    console.print(f"{stage.upper()} training complete -> {result.output_dir}")
+    if result.log_history:
+        console.print(f"final logged step: {result.log_history[-1]}")
+
+
+@train_app.command("cpt")
+def train_cpt_cmd(
+    dataset: Path = typer.Argument(..., help="Path to a CPT JSONL export ({\"text\": ...} per line)"),
+    output: Path = typer.Option(Path("outputs/cpt"), help="Directory to save the trained LoRA adapter"),
+    config: str = typer.Option("train_cpt", help="Config name under configs/ (without .yaml)"),
+) -> None:
+    """Continued pretraining (LoRA) on Apple Silicon via Unsloth's MLX backend."""
+    _run_training("cpt", dataset, output, config)
+
+
+@train_app.command("sft")
+def train_sft_cmd(
+    dataset: Path = typer.Argument(..., help="Path to an SFT JSONL export ({\"messages\": [...]} per line)"),
+    output: Path = typer.Option(Path("outputs/sft"), help="Directory to save the trained LoRA adapter"),
+    config: str = typer.Option("train_sft", help="Config name under configs/ (without .yaml)"),
+) -> None:
+    """Supervised fine-tuning (LoRA) on Apple Silicon via Unsloth's MLX backend.
+
+    DPO is not supported on this backend - see src/batterygemma/train/sft.py module docstring.
+    """
+    _run_training("sft", dataset, output, config)
 
 
 if __name__ == "__main__":
