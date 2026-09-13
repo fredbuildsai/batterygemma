@@ -14,9 +14,18 @@ from batterygemma import __version__
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
+# Bot-management signatures seen in practice while fetching OA full text (recorded, never solved/bypassed):
+#   - Cloudflare: 403 with a `cf-mitigated: challenge` response header (checked separately, header-based).
+#   - Radware Bot Manager: served with HTTP 200 (e.g. by iopscience.org/IOP), so it must be sniffed from the
+#     body rather than the status code, or it would be miscategorized as a normal (if unhelpful) HTML response.
+#   - A generic small JS-redirect "challenge" stub (seen on an Invenio-based institutional repository) that
+#     also returns 200 with a tiny loading-spinner page before a script decides whether to let the request
+#     through; the literal asset path is the only sniffable signature.
+_BOT_BODY_SIGNATURES = (b"botmanager_support@radware.com", b"Bot Manager Captcha", b"/fast-challenge/")
+
 
 class BlockedByBotProtection(RuntimeError):
-    """The server answered with a bot challenge (e.g. Cloudflare). We stop instead of trying to bypass it."""
+    """The server answered with a bot challenge (e.g. Cloudflare, Radware). We stop instead of trying to bypass it."""
 
 
 @dataclass
@@ -105,7 +114,9 @@ class PoliteClient:
             self._last_request[host] = self._clock()
 
             if response.status_code == 403 and response.headers.get("cf-mitigated") == "challenge":
-                raise BlockedByBotProtection(f"{host} returned a bot challenge for {url}")
+                raise BlockedByBotProtection(f"{host} returned a Cloudflare challenge for {url}")
+            if any(sig in response.content[:4096] for sig in _BOT_BODY_SIGNATURES):
+                raise BlockedByBotProtection(f"{host} returned a bot-management challenge page for {url}")
             if response.status_code in RETRYABLE_STATUS and attempt < self.max_retries:
                 delay = _retry_after_seconds(response) or min(120.0, self.min_interval * 2 ** (attempt + 1))
                 self._sleep(delay)

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -155,7 +157,7 @@ def screen(
 def fetch(
     limit: int = typer.Option(50, help="Maximum accepted documents to fetch in this run"),
 ) -> None:
-    """Download full text (Europe PMC XML or licensed PDF) for accepted documents."""
+    """Download full text: Europe PMC XML, else the licensed PDF, else an Unpaywall repository mirror."""
     from collections import Counter
 
     from batterygemma.fetch import fetch_document
@@ -178,12 +180,37 @@ def fetch(
             with get_session() as s:  # one transaction per document so progress survives interruption
                 doc = s.get(m.Document, doc_id)
                 outcome = fetch_document(s, doc, client, settings.raw_dir, allow=cfg["license_allow"],
-                                         flag=cfg["license_flag"])
+                                         flag=cfg["license_flag"], contact_email=settings.contact_email)
             outcomes[outcome] += 1
             console.print(f"  {doc_id}: {outcome}")
     finally:
         client.close()
     console.print(dict(outcomes))
+
+
+@app.command("add-local")
+def add_local(
+    paths: list[Path] = typer.Argument(..., help="Local PDF file(s) to add to the corpus"),
+    license: str = typer.Option(
+        "all-rights-reserved",
+        help="License to record. Leave the default unless you actually hold the rights to release this "
+        "file's content publicly — the default keeps it out of the open/CC-only track (the default track "
+        "for dataset export) while still being usable for your own local fine-tuning.",
+    ),
+) -> None:
+    """Add local PDF file(s) directly into the corpus as already-fetched documents, ready for `bg parse`."""
+    from batterygemma.screen.license import ALLOWED, evaluate_license
+    from batterygemma.sources.local import add_local_pdf
+
+    migrate()
+    settings = get_settings()
+    cfg = load_config("sources")
+    for path in paths:
+        with get_session() as s:
+            doc = add_local_pdf(s, path, settings.raw_dir, license=license)
+        decision = evaluate_license(doc.license, cfg["license_allow"], cfg["license_flag"])
+        track = "open/CC-only" if decision == ALLOWED else "all-sources only, excluded from public export"
+        console.print(f'{doc.doc_id}: "{doc.title}" — license={doc.license} ({track})')
 
 
 @app.command()

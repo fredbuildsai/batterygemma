@@ -72,3 +72,106 @@ def test_bot_challenge_is_recorded_not_bypassed(engine, tmp_path):
 def test_missing_urls(engine, tmp_path):
     outcome, doc, _ = run(engine, tmp_path, lambda request: epmc([]))
     assert outcome == "no_url" and doc.status_reason == "fetch:no_fulltext_url"
+
+
+def unpaywall(locations):
+    return httpx.Response(200, json={"oa_locations": locations})
+
+
+def test_unpaywall_repository_mirror_recovers_a_blocked_publisher_pdf(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "www.iop.org":  # the primary, blocked publisher link
+            return httpx.Response(200, content=b"<html>captcha landing page</html>", headers={"content-type": "text/html"})
+        if host == "api.unpaywall.org":
+            return unpaywall([
+                {"host_type": "publisher", "url_for_pdf": "https://www.iop.org/article/x/pdf"},
+                {"host_type": "repository", "url_for_pdf": "https://mediatum.example.org/doc/1/1.pdf"},
+            ])
+        if host == "mediatum.example.org":
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1149/x", pdf_url="https://www.iop.org/article/x/pdf")
+
+    assert outcome == "pdf_unpaywall"
+    assert doc.status == "fetched" and doc.status_reason == "fetch:pdf:unpaywall"
+    assert doc.pdf_url == "https://mediatum.example.org/doc/1/1.pdf"  # replaced with the link that actually worked
+    assert files[0].kind == "pdf"
+
+
+def test_unpaywall_skips_the_url_already_tried_and_tries_the_next_one(engine, tmp_path):
+    attempted = []
+
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "pub.example.org":
+            attempted.append(str(request.url))
+            return httpx.Response(403, headers={"cf-mitigated": "challenge"})
+        if host == "api.unpaywall.org":
+            return unpaywall([
+                {"host_type": "publisher", "url_for_pdf": "https://pub.example.org/x.pdf"},  # same as pdf_url
+                {"host_type": "repository", "url_for_pdf": "https://repo.example.org/x.pdf"},
+            ])
+        if host == "repo.example.org":
+            attempted.append(str(request.url))
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, _ = run(engine, tmp_path, handler, doi="10.1/y", pdf_url="https://pub.example.org/x.pdf")
+
+    assert outcome == "pdf_unpaywall"
+    assert attempted == ["https://pub.example.org/x.pdf", "https://repo.example.org/x.pdf"]  # not tried twice
+
+
+def test_unpaywall_recovers_a_document_with_no_cached_pdf_url(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "api.unpaywall.org":
+            return unpaywall([{"host_type": "repository", "url_for_pdf": "https://repo.example.org/z.pdf"}])
+        if host == "repo.example.org":
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1/z")  # no pdf_url at all
+
+    assert outcome == "pdf_unpaywall" and doc.status == "fetched"
+    assert files[0].kind == "pdf"
+
+
+def test_unpaywall_unknown_doi_does_not_crash_the_fetch(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "api.unpaywall.org":
+            return httpx.Response(404)  # Unpaywall's response for a DOI it doesn't know
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1/unknown")
+
+    assert outcome == "no_url" and files == []
+
+
+def test_unpaywall_all_candidates_fail_reports_the_best_outcome_seen(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "pub.example.org":
+            return httpx.Response(200, content=b"<html>login wall</html>", headers={"content-type": "text/html"})
+        if host == "api.unpaywall.org":
+            return unpaywall([{"host_type": "repository", "url_for_pdf": "https://repo.example.org/dead.pdf"}])
+        if host == "repo.example.org":
+            return httpx.Response(404)
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1/w", pdf_url="https://pub.example.org/x.pdf")
+
+    assert outcome == "not_pdf" and files == []  # the primary attempt's more informative outcome wins
