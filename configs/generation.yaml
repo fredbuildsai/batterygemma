@@ -1,0 +1,64 @@
+# Generation quotas and balance rules (see plan: "Generation volume, positive/negative balance").
+chunking:
+  target_tokens: 600
+  max_tokens: 900
+  overlap_tokens: 60          # <= ~10% of target
+  cpt_target_tokens: 1500
+  max_garble_ratio: 0.05
+
+per_chunk:
+  qa: {min: 3, max: 6, target: 4}          # scaled by number of extracted facts in the chunk
+  rephrase_fraction: 0.30                   # of accepted Q&A, linked by qid_linked_id
+  multi_turn_every_n_chunks: 2
+  multi_turn_turns: {min: 3, max: 4}
+  technical_writing_every_n_chunks: 4       # methods/results sections only
+  negatives: {min: 1, max: 2}
+
+per_paper:
+  multi_doc_synthesis: {min: 1, max: 2}
+  flawed_methods_critique: 1
+
+per_cluster:
+  papers: {min: 3, max: 5}
+  ideation: {min: 2, max: 3}
+  implausible_idea_critique_per_ideation: 1
+
+dpo:
+  sample_fraction_of_verified_qa: 0.40
+
+balance:
+  sft_negative_fraction: 0.35
+  claim_pair_contradiction_fraction: 0.50
+  closed_yes_fraction: 0.50
+  min_reasoning_fraction: 0.75
+  min_per_cell: 200                         # question_type x component
+  max_per_chunk: 8
+  max_per_paper: 60
+
+verify:
+  expected_rejection_rate: 0.30
+  min_judge_scores: {faithfulness: 4, correctness: 4, specificity: 3}
+  judge_min_kappa: 0.60
+  minhash_threshold: 0.85
+
+audit:
+  per_dataset_type: 385                     # +/-5% at 95% confidence
+  per_generator_model: 100                  # +/-10%
+  judge_calibration_labels: 200
+
+eval_gold:
+  heldout_paper_fraction: 0.10
+  closed_qa: 600
+  open_qa: 400
+  negative_detection: 300
+  ideation: 200
+  min_human_verified: 300
+
+stopping:
+  rolling_window: 200
+  acceptance_stability: 0.03
+
+system_prompt: >-
+  You are an expert lithium-ion battery materials scientist. Reason from mechanisms, structure-property
+  relationships and experimental evidence; use specific numbers and units; state uncertainty and
+  trade-offs; correct false premises; and propose ideas that are testable and grounded in the literature.

@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.DS_Store
+
+# batterygemma data (raw papers, databases, exports, model outputs)
+data/
+*.db
+outputs/

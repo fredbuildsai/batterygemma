@@ -1,0 +1,44 @@
+# Discovery queries per source. Keyword groups are OR-ed within a group and AND-ed across
+# `must` groups; `boost` terms raise the relevance score during screening.
+scope:
+  must:
+    - ["lithium-ion", "li-ion", "lithium ion", "lithium battery", "lithium metal", "solid-state lithium",
+       "lithium-sulfur", "li-s battery"]
+  boost:
+    cathode: ["cathode", "NMC", "NCA", "LFP", "LiFePO4", "LiCoO2", "LNMO", "layered oxide", "Li-rich", "disordered rock salt"]
+    anode: ["anode", "graphite", "silicon anode", "SiOx", "Li4Ti5O12", "lithium metal anode", "dendrite"]
+    electrolyte: ["electrolyte", "LiPF6", "additive", "FEC", "solid electrolyte", "LLZO", "sulfide electrolyte", "polymer electrolyte"]
+    interphase: ["SEI", "CEI", "interphase", "passivation"]
+    separator_binder: ["separator", "binder", "PVDF", "CMC", "current collector"]
+    degradation: ["capacity fade", "degradation", "cycle life", "impedance growth", "thermal runaway", "transition metal dissolution"]
+    characterization: ["XRD", "XPS", "EIS", "dQ/dV", "NMR", "TEM", "operando", "in situ"]
+  comparison_only: ["sodium-ion", "na-ion", "potassium-ion"]
+
+license_allowlist: ["CC0-1.0", "CC-BY-4.0", "CC-BY-3.0", "CC-BY-2.0", "public-domain"]
+license_flagged: ["CC-BY-SA-4.0"]
+
+sources:
+  chemrxiv:
+    enabled: true
+    base_url: "https://chemrxiv.org/engage/chemrxiv/public-api/v1"
+    terms: ["lithium-ion battery", "lithium battery cathode", "battery electrolyte", "solid-state battery", "silicon anode"]
+  arxiv:
+    enabled: true
+    categories: ["cond-mat.mtrl-sci", "physics.chem-ph", "physics.app-ph"]
+    terms: ["lithium-ion battery", "lithium battery", "solid electrolyte"]
+  openalex:
+    enabled: true
+    filter: "is_oa:true,type:article|preprint|dissertation"
+    terms: ["lithium-ion battery", "lithium battery cathode", "lithium battery anode", "battery electrolyte"]
+  europepmc:
+    enabled: true
+    terms: ["lithium-ion battery", "lithium battery"]
+  core:
+    enabled: true
+    terms: ["lithium-ion battery"]
+  osti:
+    enabled: true
+    terms: ["lithium-ion battery", "lithium battery"]
+  materials_project:
+    enabled: true
+    working_ions: ["Li"]

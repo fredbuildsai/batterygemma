@@ -1,0 +1,91 @@
+# Teacher-LLM deployments and task routes.
+# Model ids use LiteLLM's "<provider>/<model>" convention. Limits are conservative defaults;
+# edit them to match your actual quotas. A deployment whose api_key_env is unset is skipped.
+#
+#   rpm/tpm/rpd  requests per minute / tokens per minute / requests per day (null = unlimited)
+#   tier         free | paid (paid only used when BG_ALLOW_PAID=true and under the daily budget)
+#   family       model family, used to keep judge != generator family
+#   tags         capabilities: strong, fast, judge, json
+#   cost_per_mtok_in/out  USD per million tokens (paid tier budget accounting)
+
+deployments:
+  - name: gemini-flash
+    model: gemini/gemini-2.5-flash
+    api_key_env: GEMINI_API_KEY
+    tier: free
+    family: gemini
+    rpm: 10
+    rpd: 250
+    tags: [fast, strong, json, judge]
+
+  - name: mistral-medium
+    model: mistral/mistral-medium-latest
+    api_key_env: MISTRAL_API_KEY
+    tier: free
+    family: mistral
+    rpm: 2
+    rpd: null
+    tags: [strong, json, judge]
+
+  - name: nim-llama
+    model: nvidia_nim/meta/llama-3.3-70b-instruct
+    api_key_env: NVIDIA_NIM_API_KEY
+    tier: free
+    family: llama
+    rpm: 40
+    rpd: null
+    tags: [fast, json]
+
+  - name: groq-llama
+    model: groq/llama-3.3-70b-versatile
+    api_key_env: GROQ_API_KEY
+    tier: free
+    family: llama
+    rpm: 30
+    rpd: 1000
+    tags: [fast, json]
+
+  - name: cerebras-qwen
+    model: cerebras/qwen-3-32b
+    api_key_env: CEREBRAS_API_KEY
+    tier: free
+    family: qwen
+    rpm: 30
+    rpd: 14400
+    tags: [fast, json, judge]
+
+  - name: openrouter-free
+    model: openrouter/deepseek/deepseek-chat-v3-0324:free
+    api_key_env: OPENROUTER_API_KEY
+    tier: free
+    family: deepseek
+    rpm: 20
+    rpd: 50
+    tags: [strong, json]
+
+  - name: claude-sonnet
+    model: anthropic/claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    tier: paid
+    family: claude
+    rpm: 50
+    rpd: null
+    cost_per_mtok_in: 3.0
+    cost_per_mtok_out: 15.0
+    tags: [strong, json, judge]
+
+# Ordered preference per task. The router tries deployments in order, skipping any that are
+# disabled, cooling down, over quota, or (for judge routes) in the generator's family.
+routes:
+  screen:    [cerebras-qwen, groq-llama, nim-llama, gemini-flash]
+  extract:   [cerebras-qwen, nim-llama, groq-llama, gemini-flash, mistral-medium, claude-sonnet]
+  qa:        [gemini-flash, nim-llama, cerebras-qwen, groq-llama, mistral-medium, claude-sonnet]
+  negatives: [gemini-flash, mistral-medium, nim-llama, cerebras-qwen, claude-sonnet]
+  ideation:  [gemini-flash, mistral-medium, openrouter-free, claude-sonnet]
+  judge:     [mistral-medium, cerebras-qwen, gemini-flash, claude-sonnet]
+
+cooldown:
+  rate_limit_seconds: 60        # 429 per-minute limits
+  daily_quota_seconds: 86400    # provider says daily quota exhausted
+  error_seconds: 30             # transient 5xx / timeouts
+max_attempts_per_call: 6
