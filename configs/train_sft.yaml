@@ -12,8 +12,9 @@ lora:
   finetune_attention_modules: true
   finetune_mlp_modules: true
 
-# Passed to unsloth.MLXTrainingConfig. assistant_only_loss masks the loss to assistant turns only
-# (this backend's equivalent of CUDA-Unsloth's train_on_responses_only).
+# Passed to unsloth.MLXTrainingConfig. assistant_only_loss is currently forced to False in train/sft.py:
+# the built-in gemma-4 template lacks the {% generation %} markers this backend needs for response-only
+# masking (see that module's docstring) - so training is over the full rendered sequence for now.
 training:
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 4

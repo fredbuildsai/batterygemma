@@ -1,9 +1,10 @@
 """Load exported JSONL datasets (see plan: CPT `{"text": ...}`, SFT `{"messages": [...]}`) for training.
 
-SFT messages are rendered to plain text via the tokenizer's chat template *before* being handed to the
-trainer, rather than relying on the trainer's own chat-template auto-detection from a "messages" column -
-this is more verbose but every step is directly unit-testable against a stub tokenizer, with no dependency
-on the real model to check the data pipeline is correct.
+SFT rows are kept in conversational form (a `messages` column of role/content dicts) rather than pre-
+rendered to a flat string: `assistant_only_loss` (this backend's response-only loss masking) requires the
+raw turn structure to know where the assistant's response starts and ends - confirmed by a real training
+run here, which raised "assistant_only_loss=True... only supported for conversational datasets" against a
+pre-rendered `{"text": ...}` dataset. The chat template is applied by the trainer itself at train time.
 """
 
 import json
@@ -36,21 +37,26 @@ def load_cpt_dataset(path: Path) -> Dataset:
     return Dataset.from_list([{"text": row["text"]} for row in rows])
 
 
-def render_sft_example(messages: list[dict[str, Any]], tokenizer: ChatTemplateTokenizer) -> str:
-    if not messages or not any(m.get("role") == "assistant" for m in messages):
-        raise ValueError("SFT example has no assistant turn to train on")
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+def _validate_messages(messages: Any, context: str) -> list[dict[str, Any]]:
+    if not messages:
+        raise ValueError(f"{context}: missing a 'messages' field")
+    if not any(m.get("role") == "assistant" for m in messages):
+        raise ValueError(f"{context}: SFT example has no assistant turn to train on")
+    return messages
 
 
-def load_sft_dataset(path: Path, tokenizer: ChatTemplateTokenizer) -> Dataset:
+def load_sft_dataset(path: Path) -> Dataset:
+    """Loads SFT rows as a conversational dataset: a `messages` column, one list of turns per row."""
     rows = read_jsonl(path)
-    texts: list[str] = []
-    for i, row in enumerate(rows):
-        messages = row.get("messages")
-        if not messages:
-            raise ValueError(f"{path}: row {i} is missing a 'messages' field")
-        try:
-            texts.append(render_sft_example(messages, tokenizer))
-        except ValueError as exc:
-            raise ValueError(f"{path}: row {i}: {exc}") from exc
-    return Dataset.from_list([{"text": t} for t in texts])
+    validated = [_validate_messages(row.get("messages"), f"{path}: row {i}") for i, row in enumerate(rows)]
+    return Dataset.from_list([{"messages": m} for m in validated])
+
+
+def render_sft_example(messages: list[dict[str, Any]], tokenizer: ChatTemplateTokenizer) -> str:
+    """Renders one example to plain text via the tokenizer's chat template - for preview/debugging only.
+
+    Training itself does not use this: MLXTrainer applies the chat template internally from the raw
+    `messages` column, which is what `assistant_only_loss` needs (see module docstring).
+    """
+    _validate_messages(messages, "example")
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
