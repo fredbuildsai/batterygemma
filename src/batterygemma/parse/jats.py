@@ -43,6 +43,9 @@ class Section:
     section_type: str
     paragraphs: list[str] = field(default_factory=list)
     captions: list[str] = field(default_factory=list)
+    caption_images: list[list[str]] = field(default_factory=list)  # caption_images[i] aligns with captions[i]:
+                                                                    # the figure filename(s) that caption refers
+                                                                    # to (resolved to actual files by images.py)
 
 
 @dataclass
@@ -109,6 +112,21 @@ def element_text(node: ET.Element | None) -> str:
     return clean_text(" ".join("".join(parts).split()))
 
 
+def _href(el: ET.Element) -> str | None:
+    return next((v for k, v in el.attrib.items() if k.endswith("href")), None)
+
+
+def caption_images(float_el: ET.Element) -> list[str]:
+    """Bare figure filenames (e.g. "ncomms8898-f1.jpg") referenced by this float's own graphic elements -
+    not its descendants' (a table-wrap's own <graphic>, not one nested inside an unrelated child)."""
+    return [
+        name.rsplit("/", 1)[-1]
+        for g in float_el.iter()
+        if _local(g.tag) in {"graphic", "inline-graphic"} and (href := _href(g))
+        for name in [href]
+    ]
+
+
 def caption_text(float_el: ET.Element) -> str:
     label = element_text(next((c for c in float_el if _local(c.tag) == "label"), None))
     caption = element_text(next((c for c in float_el if _local(c.tag) == "caption"), None))
@@ -149,9 +167,13 @@ def _visit(sec: ET.Element, path: list[str], sections: list[Section]) -> None:
         elif tag in PARAGRAPH_TAGS:
             if text := element_text(child):
                 section.paragraphs.append(text)
-            section.captions.extend(caption_text(f) for f in child.iter() if _local(f.tag) in FLOAT_TAGS)
+            for f in child.iter():
+                if _local(f.tag) in FLOAT_TAGS:
+                    section.captions.append(caption_text(f))
+                    section.caption_images.append(caption_images(f))
         elif tag in FLOAT_TAGS:
             section.captions.append(caption_text(child))
+            section.caption_images.append(caption_images(child))
     flush()
 
 

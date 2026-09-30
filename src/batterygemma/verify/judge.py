@@ -18,7 +18,7 @@ from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_fail
 from batterygemma.db.models import GenTask, Ideation, QA
 from batterygemma.db.session import get_session
 from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import IdeationJudgeOut, QAJudgeOut, json_validator
+from batterygemma.llm.schemas import IdeationJudgeOut, QAJudgeOut, json_schema_response_format, json_validator
 
 QA_JUDGE_SYSTEM_PROMPT = (
     "You are grading a training example for a lithium-ion battery materials expert model. Score the answer "
@@ -82,7 +82,8 @@ def judge_qa(
         {"role": "user", "content": QA_JUDGE_USER_TEMPLATE.format(chunk_text=chunk_text, question=question, answer=answer)},
     ]
     result = router.complete(
-        route, messages, validate=json_validator(QAJudgeOut), json_mode=True, max_tokens=800,
+        route, messages, validate=json_validator(QAJudgeOut),
+        response_format=json_schema_response_format(QAJudgeOut, strict=False), max_tokens=800,
         use_cache=use_cache, exclude_families=[f for f in [_family_of(qa.generator_model)] if f],
         allow_same_family_fallback=True,
     )
@@ -111,7 +112,8 @@ def judge_ideation(
         )},
     ]
     result = router.complete(
-        route, messages, validate=json_validator(IdeationJudgeOut), json_mode=True, max_tokens=800,
+        route, messages, validate=json_validator(IdeationJudgeOut),
+        response_format=json_schema_response_format(IdeationJudgeOut, strict=False), max_tokens=800,
         use_cache=use_cache, exclude_families=[f for f in [_family_of(ideation.generator_model)] if f],
         allow_same_family_fallback=True,
     )

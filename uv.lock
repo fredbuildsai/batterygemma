@@ -198,6 +198,7 @@ parse = [
 ]
 train = [
     { name = "datasets" },
+    { name = "psutil" },
     { name = "trl" },
     { name = "unsloth" },
 ]
@@ -211,6 +212,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "litellm", specifier = ">=1.40" },
     { name = "lxml", marker = "extra == 'parse'", specifier = ">=5.2" },
+    { name = "psutil", marker = "extra == 'train'", specifier = ">=6.0" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },

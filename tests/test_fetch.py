@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from batterygemma.db.models import Document, File
 from batterygemma.db.session import get_session
-from batterygemma.fetch import fetch_document
+from batterygemma.fetch import best_effort_url, fetch_document
 from batterygemma.sources.base import PoliteClient
 
 ALLOW, FLAG = ["CC0", "CC-BY", "public-domain"], ["CC-BY-SA"]
@@ -78,6 +78,10 @@ def unpaywall(locations):
     return httpx.Response(200, json={"oa_locations": locations})
 
 
+def core_empty():
+    return httpx.Response(200, json={"results": []})
+
+
 def test_unpaywall_repository_mirror_recovers_a_blocked_publisher_pdf(engine, tmp_path):
     def handler(request):
         host = request.url.host
@@ -85,6 +89,8 @@ def test_unpaywall_repository_mirror_recovers_a_blocked_publisher_pdf(engine, tm
             return epmc([])
         if host == "www.iop.org":  # the primary, blocked publisher link
             return httpx.Response(200, content=b"<html>captcha landing page</html>", headers={"content-type": "text/html"})
+        if host == "api.core.ac.uk":
+            return core_empty()
         if host == "api.unpaywall.org":
             return unpaywall([
                 {"host_type": "publisher", "url_for_pdf": "https://www.iop.org/article/x/pdf"},
@@ -112,6 +118,8 @@ def test_unpaywall_skips_the_url_already_tried_and_tries_the_next_one(engine, tm
         if host == "pub.example.org":
             attempted.append(str(request.url))
             return httpx.Response(403, headers={"cf-mitigated": "challenge"})
+        if host == "api.core.ac.uk":
+            return core_empty()
         if host == "api.unpaywall.org":
             return unpaywall([
                 {"host_type": "publisher", "url_for_pdf": "https://pub.example.org/x.pdf"},  # same as pdf_url
@@ -133,6 +141,8 @@ def test_unpaywall_recovers_a_document_with_no_cached_pdf_url(engine, tmp_path):
         host = request.url.host
         if host == "www.ebi.ac.uk":
             return epmc([])
+        if host == "api.core.ac.uk":
+            return core_empty()
         if host == "api.unpaywall.org":
             return unpaywall([{"host_type": "repository", "url_for_pdf": "https://repo.example.org/z.pdf"}])
         if host == "repo.example.org":
@@ -150,6 +160,8 @@ def test_unpaywall_unknown_doi_does_not_crash_the_fetch(engine, tmp_path):
         host = request.url.host
         if host == "www.ebi.ac.uk":
             return epmc([])
+        if host == "api.core.ac.uk":
+            return core_empty()
         if host == "api.unpaywall.org":
             return httpx.Response(404)  # Unpaywall's response for a DOI it doesn't know
         raise AssertionError(f"unexpected host {host}")
@@ -159,6 +171,120 @@ def test_unpaywall_unknown_doi_does_not_crash_the_fetch(engine, tmp_path):
     assert outcome == "no_url" and files == []
 
 
+def test_core_mirror_recovers_a_blocked_publisher_pdf(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "onlinelibrary.example.org":  # the primary, blocked publisher link
+            return httpx.Response(200, content=b"<html>login wall</html>", headers={"content-type": "text/html"})
+        if host == "api.core.ac.uk":
+            return httpx.Response(200, json={"results": [{"downloadUrl": "https://core.ac.uk/download/1.pdf"}]})
+        if host == "core.ac.uk":
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1002/x", pdf_url="https://onlinelibrary.example.org/x.pdf")
+
+    assert outcome == "pdf_core"
+    assert doc.status == "fetched" and doc.status_reason == "fetch:pdf:core"
+    assert files[0].kind == "pdf"
+
+
+def test_core_is_tried_before_unpaywall(engine, tmp_path):
+    """CORE's own re-hosted copy is checked before falling through to Unpaywall's candidate list."""
+    called_unpaywall = False
+
+    def handler(request):
+        nonlocal called_unpaywall
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "api.core.ac.uk":
+            return httpx.Response(200, json={"results": [{"downloadUrl": "https://core.ac.uk/download/2.pdf"}]})
+        if host == "core.ac.uk":
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        if host == "api.unpaywall.org":
+            called_unpaywall = True
+            return unpaywall([])
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1/core-first")
+
+    assert outcome == "pdf_core" and not called_unpaywall
+
+
+def test_citation_pdf_url_meta_tag_is_followed_one_hop(engine, tmp_path):
+    """A repository landing page with no direct PDF link but a `citation_pdf_url` <meta> tag is followed -
+    this is metadata the repository itself publishes, not bot evasion (see fetch.py's module docstring)."""
+    landing = (
+        b'<html><head><meta name="citation_pdf_url" content="https://repo.example.org/files/real.pdf">'
+        b"</head><body>landing page</body></html>"
+    )
+
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "api.core.ac.uk":
+            return core_empty()
+        if host == "api.unpaywall.org":
+            return unpaywall([{"host_type": "repository", "url": "https://repo.example.org/landing/1"}])
+        if str(request.url) == "https://repo.example.org/landing/1":
+            return httpx.Response(200, content=landing, headers={"content-type": "text/html"})
+        if str(request.url) == "https://repo.example.org/files/real.pdf":
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        raise AssertionError(f"unexpected url {request.url}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1/citmeta")
+
+    assert outcome == "pdf_unpaywall" and doc.status == "fetched"
+    assert files[0].kind == "pdf"
+
+
+def test_best_effort_url_prefers_pdf_url_then_url_then_doi():
+    assert best_effort_url(Document(doc_id="d", source="t", external_id="1", title="t", norm_title="t",
+                                    pdf_url="https://pub.org/x.pdf", url="https://pub.org/x", doi="10.1/x")) == "https://pub.org/x.pdf"
+    assert best_effort_url(Document(doc_id="d", source="t", external_id="1", title="t", norm_title="t",
+                                    url="https://pub.org/x", doi="10.1/x")) == "https://pub.org/x"
+    assert best_effort_url(Document(doc_id="d", source="t", external_id="1", title="t", norm_title="t",
+                                    doi="10.1/x")) == "https://doi.org/10.1/x"
+    assert best_effort_url(Document(doc_id="d", source="t", external_id="1", title="t", norm_title="t")) == ""
+
+
+def test_network_error_on_pdf_url_does_not_crash_and_falls_back_to_unpaywall(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        if host == "flaky.example.org":
+            raise httpx.ReadTimeout("timed out", request=request)
+        if host == "api.core.ac.uk":
+            return core_empty()
+        if host == "api.unpaywall.org":
+            return unpaywall([{"host_type": "repository", "url_for_pdf": "https://repo.example.org/ok.pdf"}])
+        if host == "repo.example.org":
+            return httpx.Response(200, content=PDF, headers={"content-type": "application/pdf"})
+        raise AssertionError(f"unexpected host {host}")
+
+    outcome, doc, files = run(engine, tmp_path, handler, doi="10.1/flaky", pdf_url="https://flaky.example.org/x.pdf")
+
+    assert outcome == "pdf_unpaywall" and doc.status == "fetched"
+    assert files[0].kind == "pdf"
+
+
+def test_network_error_with_no_fallback_is_reported_not_raised(engine, tmp_path):
+    def handler(request):
+        host = request.url.host
+        if host == "www.ebi.ac.uk":
+            return epmc([])
+        raise httpx.ConnectError("connection refused", request=request)
+
+    outcome, doc, files = run(engine, tmp_path, handler, pdf_url="https://flaky.example.org/x.pdf")
+
+    assert outcome == "network_error" and doc.status_reason == "fetch:network_error" and files == []
+
+
 def test_unpaywall_all_candidates_fail_reports_the_best_outcome_seen(engine, tmp_path):
     def handler(request):
         host = request.url.host
@@ -166,6 +292,8 @@ def test_unpaywall_all_candidates_fail_reports_the_best_outcome_seen(engine, tmp
             return epmc([])
         if host == "pub.example.org":
             return httpx.Response(200, content=b"<html>login wall</html>", headers={"content-type": "text/html"})
+        if host == "api.core.ac.uk":
+            return core_empty()
         if host == "api.unpaywall.org":
             return unpaywall([{"host_type": "repository", "url_for_pdf": "https://repo.example.org/dead.pdf"}])
         if host == "repo.example.org":

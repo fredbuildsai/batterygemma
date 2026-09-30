@@ -65,7 +65,8 @@ def test_generate_dpo_pair_persists_chosen_and_rejected(engine):
     assert stored.chosen[0]["content"] == "Trace water hydrolyzes LiPF6, producing HF."
     assert stored.rejected[0]["content"] == "HF forms because LiPF6 reduces at the anode."
     assert stored.prompt[0]["content"] == "Why does LiPF6 form HF?"
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "DPORejectionOut"
 
 
 def test_annotate_qa_dpo_is_resumable(engine):

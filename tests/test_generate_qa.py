@@ -77,7 +77,8 @@ def test_generate_qa_persists_grounded_items(engine):
     assert qa.status == "generated" and qa.question_type == "mechanism" and qa.component == "cathode"
     assert qa.turns[0]["role"] == "user" and qa.turns[1]["role"] == "assistant"
     assert qa.doc_ids == ["doc:1"] and qa.license == "CC-BY-4.0"
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "QAGenerationOut"
 
 
 def test_ungrounded_answer_is_rejected(engine):

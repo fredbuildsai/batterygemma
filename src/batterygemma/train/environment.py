@@ -15,7 +15,7 @@ import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
-from batterygemma.settings import PROJECT_ROOT
+from batterygemma.settings import PACKAGE_ROOT
 
 # Every optional extra this project defines, kept in sync with pyproject.toml's [project.optional-dependencies].
 # Each `uv sync` call defines the *complete* extra set for that call - passing only `--extra train` uninstalls
@@ -46,7 +46,7 @@ def ensure_unsloth(*, extras: tuple[str, ...] = ALL_EXTRAS) -> None:
     if is_unsloth_installed():
         return
     args = ["uv", "sync", *[flag for extra in extras for flag in ("--extra", extra)]]
-    result = subprocess.run(args, cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
+    result = subprocess.run(args, cwd=PACKAGE_ROOT, capture_output=True, text=True, check=False)
     if result.returncode != 0 or not is_unsloth_installed():
         raise UnslothInstallError(
             f"`{' '.join(args)}` did not produce an importable `unsloth`.\n"

@@ -14,7 +14,7 @@ from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_fail
 from batterygemma.db.models import Chunk, GenTask, QA
 from batterygemma.db.session import get_session
 from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import QAGenerationOut, QAItemOut, json_validator
+from batterygemma.llm.schemas import QAGenerationOut, QAItemOut, json_schema_response_format, json_validator
 
 SYSTEM_PROMPT = (
     "You are an expert lithium-ion battery materials scientist writing training questions. Every answer "
@@ -27,7 +27,7 @@ USER_TEMPLATE = """From this excerpt, write 2-4 expert Q&A pairs as JSON matchin
 {{"items": [{{"question": str, "answer": str, "reasoning": str, "question_type": one of ["mechanism",\
 "structure_property","trade_off","characterization_interpretation","synthesis_processing",\
 "failure_analysis","quantitative","safety_cost","comparison","other"], "answer_type": "OPEN" or "CLOSED", \
-"component": one of ["cathode","anode","electrolyte","interphase","separator_binder","cell"]|null, \
+"component": one of ["cathode","anode","electrolyte","interphase","separator_binder","cell","other"]|null, \
 "chemistry": str|null}}]}}
 
 "reasoning" is the step-by-step derivation from the excerpt to the answer (mechanism chain, not just a
@@ -74,7 +74,7 @@ def generate_qa(session: Session, router: LLMRouter, chunk: Chunk, *, route: str
     """
     result = router.complete(
         route, build_qa_messages(chunk.text), validate=json_validator(QAGenerationOut),
-        json_mode=True, max_tokens=3000, use_cache=use_cache,
+        response_format=json_schema_response_format(QAGenerationOut), max_tokens=3000, use_cache=use_cache,
     )
     parsed: QAGenerationOut = result.parsed
 

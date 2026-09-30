@@ -92,7 +92,8 @@ def test_judge_qa_accepts_when_scores_meet_the_floor(engine):
     with get_session(engine) as s:
         qa = s.get(QA, QA_ID)
     assert qa.status == "accepted" and qa.judge_scores["faithfulness"] == 5
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "QAJudgeOut"
 
 
 def test_judge_qa_uses_a_different_family_from_the_generator(engine):

@@ -93,7 +93,8 @@ def test_generate_ideation_persists_ideas(engine):
         stored = s.get(Ideation, f"{CHUNK_ID}#idea")
     assert stored.problem.startswith("Silicon anodes")
     assert stored.ideas[0]["hypothesis"].startswith("A crosslinked")
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "IdeationOut"
 
 
 def test_generate_ideation_returns_none_when_no_ideas_proposed(engine):

@@ -1,0 +1,61 @@
+# Discovery queries per source. Keyword groups are OR-ed within a group and AND-ed across
+# `must` groups; `boost` terms raise the relevance score during screening.
+scope:
+  must:
+    - ["lithium-ion", "li-ion", "lithium ion", "lithium battery", "lithium metal", "solid-state lithium",
+       "lithium-sulfur", "li-s battery"]
+  boost:
+    cathode: ["cathode", "NMC", "NCA", "LFP", "LiFePO4", "LiCoO2", "LNMO", "layered oxide", "Li-rich", "disordered rock salt"]
+    anode: ["anode", "graphite", "silicon anode", "SiOx", "Li4Ti5O12", "lithium metal anode", "dendrite"]
+    electrolyte: ["electrolyte", "LiPF6", "additive", "FEC", "solid electrolyte", "LLZO", "sulfide electrolyte", "polymer electrolyte"]
+    interphase: ["SEI", "CEI", "interphase", "passivation"]
+    separator_binder: ["separator", "binder", "PVDF", "CMC", "current collector"]
+    degradation: ["capacity fade", "degradation", "cycle life", "impedance growth", "thermal runaway", "transition metal dissolution"]
+    characterization: ["XRD", "XPS", "EIS", "dQ/dV", "NMR", "TEM", "operando", "in situ"]
+  comparison_only: ["sodium-ion", "na-ion", "potassium-ion"]
+
+# License families (version-less ids from batterygemma.screen.license). Public HF release => no NC/ND.
+license_allow: ["CC0", "CC-BY", "public-domain"]
+license_flag: ["CC-BY-SA"]
+
+sources:
+  chemrxiv:
+    enabled: true
+    base_url: "https://chemrxiv.org/engage/chemrxiv/public-api/v1"
+    terms: ["lithium-ion battery", "lithium battery cathode", "battery electrolyte", "solid-state battery", "silicon anode"]
+  arxiv:
+    enabled: true
+    # OAI-PMH sets (verified via ListSets); records are then filtered locally by category and scope.must terms
+    oai_sets: ["physics:cond-mat:mtrl-sci", "physics:physics:chem-ph", "physics:physics:app-ph"]
+    categories: ["cond-mat.mtrl-sci", "physics.chem-ph", "physics.app-ph"]
+  openalex:
+    enabled: true
+    filter: "is_oa:true,type:article|preprint|dissertation"
+    # The discovery limit is split evenly across these terms so each topic contributes.
+    terms:
+      - "lithium-ion battery"
+      - "layered oxide cathode lithium-ion"
+      - "nickel-rich cathode degradation"
+      - "LiFePO4 cathode"
+      - "graphite anode lithium-ion"
+      - "silicon anode lithium-ion"
+      - "lithium metal anode dendrite"
+      - "lithium-ion electrolyte additive"
+      - "solid-state electrolyte lithium"
+      - "solid electrolyte interphase lithium"
+      - "lithium-sulfur battery"
+      - "lithium-ion battery degradation mechanism"
+      - "thermal runaway lithium-ion"
+      - "separator binder lithium-ion battery"
+  europepmc:
+    enabled: true
+    terms: ["lithium-ion battery", "lithium battery"]
+  core:
+    enabled: true
+    terms: ["lithium-ion battery"]
+  osti:
+    enabled: true
+    terms: ["lithium-ion battery", "lithium battery"]
+  materials_project:
+    enabled: true
+    working_ions: ["Li"]

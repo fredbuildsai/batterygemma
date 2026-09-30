@@ -1,0 +1,23 @@
+# Throwaway config for a 5-step smoke test of the packed CPT export (bg export --cpt-pack, rows now
+# average ~640 tokens instead of ~400) - measures real tok/s and peak memory against longer sequences
+# before committing to a full-corpus run. Not meant to be kept long-term.
+model_name: unsloth/gemma-4-E2B-it-UD-MLX-4bit
+max_seq_length: 2048
+text_only: true
+
+lora:
+  r: 16
+  lora_alpha: 16
+  lora_dropout: 0
+  finetune_language_layers: true
+  finetune_attention_modules: true
+  finetune_mlp_modules: true
+
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_steps: 5
+  learning_rate: 0.0001
+  warmup_steps: 10
+  logging_steps: 1
+  save_steps: 0

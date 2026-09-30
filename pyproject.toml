@@ -23,7 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 parse = ["docling>=2.0", "lxml>=5.2"]
 dedupe = ["datasketch>=1.6"]
-train = ["unsloth", "trl", "datasets"]
+train = ["unsloth", "trl", "datasets", "psutil>=6.0"]
 dev = ["pytest>=8.2", "respx>=0.21"]
 
 [project.scripts]

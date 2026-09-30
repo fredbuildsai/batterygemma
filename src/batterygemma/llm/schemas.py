@@ -15,7 +15,9 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 ModelT = TypeVar("ModelT", bound=BaseModel)
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
-Component = Literal["cathode", "anode", "electrolyte", "interphase", "separator_binder", "cell"]
+Component = Literal["cathode", "anode", "electrolyte", "interphase", "separator_binder", "cell", "other"]
+# "other": non-active-material components with no dedicated bucket above - binder and conductive carbon/
+# additive are the common cases (see annotate.facts.USER_TEMPLATE for the worked examples given to the LLM).
 FactCategory = Literal[
     "structure", "electrochemical", "thermal", "mechanical", "synthesis", "characterization", "degradation",
     "cost_safety",
@@ -85,11 +87,20 @@ class ComparisonOut(BaseModel):
     _check = field_validator("baseline", "modification", "metric", "evidence_sentence")(_non_empty)
 
 
-class ExtractionOut(BaseModel):
-    """Top-level shape the `extract` route must return for one chunk."""
+class ChunkExtractionOut(BaseModel):
+    """One chunk's worth of facts/comparisons, tagged with its position in the request - the `extract`
+    route always returns a `BatchExtractionOut` (a list of these), whether the request held 1 chunk or
+    many: there is one extraction mechanism, not a separate single-chunk shape and a batch shape."""
 
+    chunk_index: int
     facts: list[FactOut] = Field(default_factory=list)
     comparisons: list[ComparisonOut] = Field(default_factory=list)
+
+
+class BatchExtractionOut(BaseModel):
+    """Top-level shape the `extract` route must return for a request of 1 or more chunks."""
+
+    results: list[ChunkExtractionOut] = Field(default_factory=list)
 
 
 class ClaimPairOut(BaseModel):
@@ -101,8 +112,18 @@ class ClaimPairOut(BaseModel):
     _check = field_validator("sentence_1", "sentence_2")(_non_empty)
 
 
-class ClaimPairsOut(BaseModel):
+class ChunkClaimPairsOut(BaseModel):
+    """One chunk's worth of claim pairs, tagged with its position in the request - see
+    `ChunkExtractionOut` for why there's one mechanism for 1 chunk or many, not two."""
+
+    chunk_index: int
     pairs: list[ClaimPairOut] = Field(default_factory=list)
+
+
+class BatchClaimPairsOut(BaseModel):
+    """Top-level shape the `extract` route must return for a claim-pairs request of 1 or more chunks."""
+
+    results: list[ChunkClaimPairsOut] = Field(default_factory=list)
 
 
 class QAItemOut(BaseModel):
@@ -176,12 +197,58 @@ class IdeationJudgeOut(BaseModel):
     rationale: str = ""
 
 
+class OpenAnswerJudgeOut(BaseModel):
+    """Stage 11 (Eval): does a model's free-form answer agree with the gold reference answer?"""
+
+    correct: bool
+    score: int = Field(ge=1, le=5)
+    rationale: str = ""
+
+
+class NegativeDetectionJudgeOut(BaseModel):
+    """Stage 11 (Eval): did a model's answer catch and correct the planted flaw?"""
+
+    caught_flaw: bool
+    rationale: str = ""
+
+
+def json_schema_response_format(model_cls: type[BaseModel], *, strict: bool = True) -> dict:
+    """The OpenAI-style `response_format` value for schema-constrained decoding (as opposed to the generic
+    `{"type": "json_object"}` mode). Confirmed via NVIDIA's own structured-output docs and a real live test
+    against `nvidia/nemotron-3-super-120b-a12b:free` on 2026-09-15: with plain `json_object` mode this model
+    regularly violated our schema (wrong enum values, missing required fields, wrong array length); with
+    `json_schema` mode passing this exact schema, 5/5 real chunks came back fully schema-valid with zero
+    violations. Not yet verified against every other deployment - callers should keep `json_mode=True` as
+    the safe default and opt into this per route/call site once tested against that route's actual chain.
+
+    `strict=False` (needed for Groq): Groq's `strict: true` mode requires `additionalProperties: false` and
+    every property listed in `required` at *every* nesting level, and rejects a free-form `dict[str, Any]`
+    field outright (confirmed live 2026-09-16/17 against ExtractionOut and QAJudgeOut) - the same limitation
+    OpenAI's own strict structured outputs have. With `strict=False` the schema is still sent as a hint
+    (confirmed live to produce well-formed, schema-compliant JSON on gpt-oss-120b for both extraction and
+    judge schemas); our own pydantic validation (`json_validator`) is what actually enforces correctness.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": model_cls.__name__, "schema": model_cls.model_json_schema(), "strict": strict},
+    }
+
+
 def json_validator(model_cls: type[ModelT]) -> Callable[[str], ModelT]:
     """A `router.complete(..., validate=...)` callback: parses and validates `text` against `model_cls`.
 
     Tolerates a model wrapping its JSON in a ```json ... ``` fence despite `json_mode=True` (reasoning
     models sometimes do this anyway). Raises ValueError on any failure, which the router treats as
     `invalid_output` and retries on the next deployment.
+
+    Also rejects a non-empty JSON object whose keys share nothing with `model_cls`'s own field names
+    (e.g. a garbled/truncated `{"": "results"}` for a schema whose only field is `results`) - pydantic
+    alone accepts this silently whenever every field has a default (`Field(default_factory=list)` etc.),
+    which let a real truncated response from `openrouter-qwen3.8-27b` get cached as a valid, permanently
+    empty "ok" result for one batch's prompt hash (confirmed live 2026-09-22: the router's cache then
+    replayed that same garbage forever, since a cached "ok" is never re-validated against the live
+    provider). A genuinely empty object (`{}`, e.g. a model correctly reporting "nothing found") is still
+    accepted - only an object with content that matches none of the expected fields is rejected.
     """
 
     def validate(text: str) -> ModelT:
@@ -192,6 +259,11 @@ def json_validator(model_cls: type[ModelT]) -> Callable[[str], ModelT]:
             data = json.loads(candidate)
         except json.JSONDecodeError as exc:
             raise ValueError(f"not valid JSON: {exc}") from exc
+        if isinstance(data, dict) and data and not (set(data.keys()) & set(model_cls.model_fields.keys())):
+            raise ValueError(
+                f"JSON object shares no fields with {model_cls.__name__} (got keys {sorted(data.keys())}) - "
+                "likely a garbled or truncated response"
+            )
         try:
             return model_cls.model_validate(data)
         except ValidationError as exc:

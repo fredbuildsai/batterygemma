@@ -106,11 +106,11 @@ class PoliteClient:
         self._clock = clock
         self._last_request: dict[str, float] = {}
 
-    def get(self, url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+    def get(self, url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> httpx.Response:
         host = urlparse(url).netloc
         for attempt in range(self.max_retries + 1):
             self._respect_interval(host)
-            response = self._client.get(url, params=params)
+            response = self._client.get(url, params=params, headers=headers)
             self._last_request[host] = self._clock()
 
             if response.status_code == 403 and response.headers.get("cf-mitigated") == "challenge":

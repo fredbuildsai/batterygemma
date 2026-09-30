@@ -3,7 +3,7 @@ from sqlalchemy import func, select
 from batterygemma.db.models import Chunk, Document, File
 from batterygemma.db.session import get_session
 from batterygemma.parse.jats import ParsedDocument, Section
-from batterygemma.parse.pipeline import parse_and_chunk
+from batterygemma.parse.pipeline import parse_and_chunk, reconstruct_sections_from_chunks, rechunk_from_existing_chunks
 from tests.test_parse import JATS
 
 CHUNKING = {"target_tokens": 600, "max_tokens": 900, "overlap_tokens": 60, "max_garble_ratio": 0.05}
@@ -73,3 +73,59 @@ def test_document_without_parsable_file_is_left_untouched(engine, tmp_path):
         assert doc.status == "fetched" and doc.status_reason == "parse:no_parsable_file"
         pdf_only = add_doc(s, "openalex:W4", "pdf", tmp_path / "x.pdf")
         assert parse_and_chunk(s, pdf_only, words, CHUNKING, pdf_parser=None) == 0  # no PDF parser supplied
+
+
+def test_reconstruct_sections_from_chunks_strips_overlap_and_regroups_by_section_path():
+    chunks = [
+        Chunk(chunk_id="d#s00-c00", doc_id="d", section_path=["Intro"], section_type="introduction",
+              order=0, tokens=4, overlap_prev_tokens=0, text="First paragraph of the intro.",
+              captions=["Fig 1."], images=["fig1.jpg"]),
+        Chunk(chunk_id="d#s00-c01", doc_id="d", section_path=["Intro"], section_type="introduction",
+              order=1, tokens=5, overlap_prev_tokens=2,
+              text="of the intro.\n\nSecond paragraph, new content only."),
+        Chunk(chunk_id="d#s01-c00", doc_id="d", section_path=["Methods"], section_type="methods",
+              order=2, tokens=3, overlap_prev_tokens=0, text="Methods paragraph."),
+    ]
+    sections = reconstruct_sections_from_chunks(chunks)
+
+    assert [s.path for s in sections] == [["Intro"], ["Methods"]]  # order preserved via min(order) per group
+    intro = sections[0]
+    # the overlap prefix ("of the intro.") from chunk 2 must not be duplicated
+    assert intro.paragraphs == ["First paragraph of the intro.", "Second paragraph, new content only."]
+    assert intro.captions == ["Fig 1."]
+    assert intro.caption_images == [["fig1.jpg"]]
+    assert sections[1].paragraphs == ["Methods paragraph."]
+    assert sections[1].captions == []
+
+
+def test_rechunk_from_existing_chunks_merges_small_chunks_without_reparsing_the_raw_file(engine):
+    """The whole point: re-chunk using only what's already in the chunks table, never touching a
+    PDF/XML file or a pdf_parser - the document here doesn't even have a File row."""
+    with get_session(engine) as s:
+        doc = Document(doc_id="d1", source="t", external_id="1", title="t", norm_title="t", status="chunked")
+        s.add(doc)
+        s.add(Chunk(chunk_id="d1#s00-c00", doc_id="d1", section_path=["Body"], order=0, tokens=6,
+                    overlap_prev_tokens=0, text="Short first chunk from the old small-chunk scheme."))
+        s.add(Chunk(chunk_id="d1#s00-c01", doc_id="d1", section_path=["Body"], order=1, tokens=6,
+                    overlap_prev_tokens=0, text="Short second chunk, still the same section."))
+
+    big_chunking = {"target_tokens": 600, "max_tokens": 900, "overlap_tokens": 60, "max_garble_ratio": 0.05}
+    with get_session(engine) as s:
+        n = rechunk_from_existing_chunks(s, s.get(Document, "d1"), words, big_chunking)
+        assert n == 1  # both old chunks now fit in one, well under the much bigger target
+
+    with get_session(engine) as s:
+        chunks = s.scalars(select(Chunk).where(Chunk.doc_id == "d1")).all()
+        doc = s.get(Document, "d1")
+    assert len(chunks) == 1
+    assert chunks[0].text == ("Short first chunk from the old small-chunk scheme.\n\n"
+                               "Short second chunk, still the same section.")
+    assert doc.status_reason == "parse:rechunk_from_existing:1_chunks"
+
+
+def test_rechunk_from_existing_chunks_returns_zero_when_document_has_no_chunks(engine):
+    with get_session(engine) as s:
+        doc = Document(doc_id="d2", source="t", external_id="2", title="t", norm_title="t", status="chunked")
+        s.add(doc)
+    with get_session(engine) as s:
+        assert rechunk_from_existing_chunks(s, s.get(Document, "d2"), words, CHUNKING) == 0

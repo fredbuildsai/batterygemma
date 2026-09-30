@@ -29,6 +29,7 @@ class ChunkDraft:
     tokens: int
     overlap_prev_tokens: int
     captions: list[str] = field(default_factory=list)
+    images: list[str] = field(default_factory=list)
 
 
 def load_token_counter() -> TokenCounter:
@@ -45,6 +46,26 @@ def load_token_counter() -> TokenCounter:
 
 def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in _SENTENCE_BOUNDARY.split(text) if s.strip()]
+
+
+def strip_overlap_prefix(text: str, overlap_prev_tokens: int) -> str:
+    """The inverse of what `chunk_sections` prepends: a chunk after the first in a section stores
+    `f"{overlap_sentences}\\n\\n{body_text}"`, where `overlap_sentences` is exactly
+    `overlap_prev_tokens` worth of trailing sentences from the previous chunk, joined by a single
+    space. Splitting on the first "\\n\\n" reliably separates them, since `overlap_sentences` itself
+    never contains "\\n\\n" (verified against real chunks: it's built by `' '.join(tail)`, never
+    `'\\n\\n'.join`). Returns `text` unchanged when there's no overlap to strip."""
+    if overlap_prev_tokens <= 0:
+        return text
+    return text.split("\n\n", 1)[-1]
+
+
+def _flat_images(section: Section) -> list[str]:
+    seen: dict[str, None] = {}
+    for names in section.caption_images:
+        for name in names:
+            seen.setdefault(name, None)
+    return list(seen)
 
 
 def chunk_sections(
@@ -65,7 +86,7 @@ def chunk_sections(
             if section.captions:
                 text = "\n\n".join(section.captions)
                 drafts.append(ChunkDraft(section_index, 0, section.path, section.section_type, text,
-                                         count_tokens(text), 0, list(section.captions)))
+                                         count_tokens(text), 0, list(section.captions), _flat_images(section)))
             continue
 
         body: list[str] = []
@@ -80,7 +101,8 @@ def chunk_sections(
             text = f"{' '.join(overlap)}\n\n{body_text}" if overlap else body_text
             drafts.append(ChunkDraft(section_index, order, section.path, section.section_type, text,
                                      count_tokens(text), overlap_count,
-                                     list(section.captions) if order == 0 else []))
+                                     list(section.captions) if order == 0 else [],
+                                     _flat_images(section) if order == 0 else []))
             tail: list[str] = []
             tail_tokens = 0
             for sentence in reversed(split_sentences(body_text)):

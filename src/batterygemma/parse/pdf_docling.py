@@ -152,9 +152,11 @@ def docling_to_parsed(document: Any) -> ParsedDocument:
         elif label == "table":
             caption = clean_text(item.caption_text(document) or "")
             current.captions.append(f"{caption}\n{item.export_to_markdown(document)}".strip())
+            current.caption_images.append([])  # Docling doesn't expose a resolvable image file for this project
         elif label in FIGURE_LABELS:
             if caption := clean_text(item.caption_text(document) or ""):
                 current.captions.append(caption)
+                current.caption_images.append([])
     flush()
     return ParsedDocument(title=title, abstract=" ".join(abstract_parts) or None, sections=sections)
 

@@ -1,9 +1,9 @@
 import pytest
 
 from batterygemma.llm.schemas import (
-    ClaimPairsOut,
+    BatchClaimPairsOut,
+    BatchExtractionOut,
     DPORejectionOut,
-    ExtractionOut,
     FalsePremiseOut,
     IdeationJudgeOut,
     IdeationOut,
@@ -12,7 +12,8 @@ from batterygemma.llm.schemas import (
     json_validator,
 )
 
-VALID_EXTRACTION = {
+VALID_CHUNK_EXTRACTION = {
+    "chunk_index": 0,
     "facts": [
         {
             "material": {"name": "NMC811", "formula": "LiNi0.8Mn0.1Co0.1O2", "class": "layered oxide",
@@ -32,72 +33,114 @@ VALID_EXTRACTION = {
         }
     ],
 }
+VALID_EXTRACTION = {"results": [VALID_CHUNK_EXTRACTION]}
 
 
 def test_valid_extraction_parses():
-    result = ExtractionOut.model_validate(VALID_EXTRACTION)
-    assert result.facts[0].material.name == "NMC811"
-    assert result.facts[0].material.material_class == "layered oxide"  # aliased from "class"
-    assert result.comparisons[0].direction == "improves"
+    result = BatchExtractionOut.model_validate(VALID_EXTRACTION)
+    assert result.results[0].chunk_index == 0
+    assert result.results[0].facts[0].material.name == "NMC811"
+    assert result.results[0].facts[0].material.material_class == "layered oxide"  # aliased from "class"
+    assert result.results[0].comparisons[0].direction == "improves"
+
+
+def test_a_batch_of_several_chunks_tags_each_result_with_its_own_index():
+    """The same mechanism handles 1 chunk or many - a batch response is just a longer `results` list,
+    each entry independently tagged, not a different shape."""
+    second = {**VALID_CHUNK_EXTRACTION, "chunk_index": 1, "facts": [], "comparisons": []}
+    result = BatchExtractionOut.model_validate({"results": [VALID_CHUNK_EXTRACTION, second]})
+    assert [r.chunk_index for r in result.results] == [0, 1]
+    assert len(result.results[0].facts) == 1
+    assert result.results[1].facts == []
+
+
+def test_other_component_is_accepted_for_binder_and_conductive_carbon():
+    bad = {**VALID_CHUNK_EXTRACTION["facts"][0]}
+    bad["material"] = {**bad["material"], "name": "PVDF binder", "component": "other"}
+    result = BatchExtractionOut.model_validate({"results": [{**VALID_CHUNK_EXTRACTION, "facts": [bad]}]})
+    assert result.results[0].facts[0].material.component == "other"
 
 
 def test_triple_must_have_three_elements_or_be_empty():
-    bad = {**VALID_EXTRACTION["facts"][0], "triple": ["only", "two"]}
+    bad = {**VALID_CHUNK_EXTRACTION["facts"][0], "triple": ["only", "two"]}
     with pytest.raises(ValueError, match="triple"):
-        ExtractionOut.model_validate({"facts": [bad], "comparisons": []})
+        BatchExtractionOut.model_validate({"results": [{**VALID_CHUNK_EXTRACTION, "facts": [bad]}]})
 
 
 def test_unknown_category_is_rejected():
-    bad = {**VALID_EXTRACTION["facts"][0], "category": "not-a-real-category"}
+    bad = {**VALID_CHUNK_EXTRACTION["facts"][0], "category": "not-a-real-category"}
     with pytest.raises(ValueError):
-        ExtractionOut.model_validate({"facts": [bad], "comparisons": []})
+        BatchExtractionOut.model_validate({"results": [{**VALID_CHUNK_EXTRACTION, "facts": [bad]}]})
 
 
 def test_empty_evidence_sentence_is_rejected():
-    bad = {**VALID_EXTRACTION["facts"][0], "evidence_sentence": "   "}
+    bad = {**VALID_CHUNK_EXTRACTION["facts"][0], "evidence_sentence": "   "}
     with pytest.raises(ValueError, match="empty"):
-        ExtractionOut.model_validate({"facts": [bad], "comparisons": []})
+        BatchExtractionOut.model_validate({"results": [{**VALID_CHUNK_EXTRACTION, "facts": [bad]}]})
 
 
 def test_facts_and_comparisons_both_default_to_empty():
-    result = ExtractionOut.model_validate({})
-    assert result.facts == [] and result.comparisons == []
+    result = BatchExtractionOut.model_validate({"results": [{"chunk_index": 0}]})
+    assert result.results[0].facts == [] and result.results[0].comparisons == []
 
 
-VALID_PAIRS = {
+def test_results_defaults_to_empty():
+    result = BatchExtractionOut.model_validate({})
+    assert result.results == []
+
+
+VALID_CHUNK_PAIRS = {
+    "chunk_index": 0,
     "pairs": [
         {"sentence_1": "Capacity fades faster above 4.4 V.", "sentence_2": "Above 4.4 V, capacity fades faster.",
          "category": "paraphrase", "subset_name": "entity"},
         {"sentence_1": "Capacity fades faster above 4.4 V.", "sentence_2": "Capacity fades slower above 4.4 V.",
          "category": "contradiction", "subset_name": "swap"},
-    ]
+    ],
 }
+VALID_PAIRS = {"results": [VALID_CHUNK_PAIRS]}
 
 
 def test_valid_claim_pairs_parse():
-    result = ClaimPairsOut.model_validate(VALID_PAIRS)
-    assert len(result.pairs) == 2
-    assert result.pairs[1].category == "contradiction"
+    result = BatchClaimPairsOut.model_validate(VALID_PAIRS)
+    assert len(result.results[0].pairs) == 2
+    assert result.results[0].pairs[1].category == "contradiction"
 
 
 class TestJsonValidator:
     def test_parses_plain_json(self):
-        validate = json_validator(ExtractionOut)
-        result = validate('{"facts": [], "comparisons": []}')
-        assert isinstance(result, ExtractionOut)
+        validate = json_validator(BatchExtractionOut)
+        result = validate('{"results": [{"chunk_index": 0, "facts": [], "comparisons": []}]}')
+        assert isinstance(result, BatchExtractionOut)
 
     def test_strips_a_markdown_fence(self):
-        validate = json_validator(ClaimPairsOut)
-        text = "Sure, here you go:\n```json\n" + '{"pairs": []}' + "\n```"
-        assert isinstance(validate(text), ClaimPairsOut)
+        validate = json_validator(BatchClaimPairsOut)
+        text = "Sure, here you go:\n```json\n" + '{"results": [{"chunk_index": 0, "pairs": []}]}' + "\n```"
+        assert isinstance(validate(text), BatchClaimPairsOut)
 
     def test_invalid_json_raises_value_error(self):
         with pytest.raises(ValueError, match="not valid JSON"):
-            json_validator(ExtractionOut)("this is not json at all")
+            json_validator(BatchExtractionOut)("this is not json at all")
 
     def test_schema_mismatch_raises_value_error(self):
-        with pytest.raises(ValueError, match="ExtractionOut"):
-            json_validator(ExtractionOut)('{"facts": [{"property": "x"}], "comparisons": []}')  # missing material
+        with pytest.raises(ValueError, match="BatchExtractionOut"):
+            # missing material inside a result entry
+            json_validator(BatchExtractionOut)('{"results": [{"chunk_index": 0, "facts": [{"property": "x"}]}]}')
+
+    def test_a_garbled_object_sharing_no_fields_with_the_schema_is_rejected(self):
+        """Regression test for a real incident: `openrouter-qwen3.8-27b` returned the truncated/garbled
+        `{"": "results"}` for a BatchExtractionOut request. Pydantic alone accepted it silently (`results`
+        defaults to `[]`), and the router then cached that permanently-empty "ok" result forever for that
+        batch's prompt - this rejection is what should have made the router treat it as invalid_output and
+        fail over to the next deployment instead."""
+        with pytest.raises(ValueError, match="shares no fields"):
+            json_validator(BatchExtractionOut)('{"": "results"}')
+
+    def test_a_genuinely_empty_object_still_validates(self):
+        """An honestly empty response (e.g. the model reporting "nothing found" via `{}`) must still be
+        accepted - only content that matches none of the schema's fields is rejected, not emptiness itself."""
+        result = json_validator(BatchExtractionOut)("{}")
+        assert result.results == []
 
 
 VALID_QA_ITEM = {
@@ -168,3 +211,13 @@ def test_ideation_judge_rejects_out_of_range_scores():
     IdeationJudgeOut.model_validate({"groundedness": 5, "correctness": 4, "novelty": 3, "feasibility": 4})
     with pytest.raises(ValueError):
         IdeationJudgeOut.model_validate({"groundedness": 0, "correctness": 4, "novelty": 3, "feasibility": 4})
+
+
+def test_json_schema_response_format_shape():
+    from batterygemma.llm.schemas import json_schema_response_format
+
+    rf = json_schema_response_format(BatchExtractionOut)
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["name"] == "BatchExtractionOut"
+    assert rf["json_schema"]["strict"] is True
+    assert rf["json_schema"]["schema"] == BatchExtractionOut.model_json_schema()

@@ -1,4 +1,5 @@
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -256,6 +257,306 @@ def test_api_base_and_extra_body_and_min_max_tokens_are_forwarded(engine):
     assert result.text == "the answer"
 
 
+def test_response_format_takes_precedence_over_json_mode(engine):
+    captured = {}
+
+    def completion(**kw):
+        captured.update(kw)
+        return response('{"ok": true}')
+
+    router = LLMRouter(REASONING_MODEL, engine=engine, completion_fn=completion)
+    schema_format = {"type": "json_schema", "json_schema": {"name": "X", "schema": {}, "strict": True}}
+    router.complete("qa", [{"role": "user", "content": "hi"}], json_mode=True, response_format=schema_format,
+                    use_cache=False)
+
+    assert captured["response_format"] == schema_format  # not {"type": "json_object"}
+
+
+def test_json_mode_still_works_when_response_format_is_not_given(engine):
+    captured = {}
+
+    def completion(**kw):
+        captured.update(kw)
+        return response('{"ok": true}')
+
+    router = LLMRouter(REASONING_MODEL, engine=engine, completion_fn=completion)
+    router.complete("qa", [{"role": "user", "content": "hi"}], json_mode=True, use_cache=False)
+
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+DEPLOYMENT_TEMPERATURE = {
+    "deployments": [
+        {"name": "cool-model", "model": "p/cool", "api_key_env": "KEY_A", "family": "fam1", "temperature": 0.4},
+        {"name": "default-model", "model": "p/default", "api_key_env": "KEY_B", "family": "fam2"},
+    ],
+    "routes": {"qa": ["cool-model", "default-model"]},
+}
+
+
+def test_deployment_temperature_overrides_the_calls_default(engine):
+    captured = []
+
+    def completion(**kw):
+        captured.append(kw["temperature"])
+        return response('{"ok": true}')
+
+    router = LLMRouter(DEPLOYMENT_TEMPERATURE, engine=engine, completion_fn=completion)
+    router.complete("qa", [{"role": "user", "content": "hi"}], temperature=0.9, use_cache=False)
+
+    assert captured == [0.4]  # cool-model's own temperature, not the caller's 0.9
+
+
+def test_deployment_without_a_temperature_falls_back_to_the_calls_value(engine, monkeypatch):
+    monkeypatch.setenv("KEY_A", "")  # disable cool-model so default-model is picked
+    captured = []
+
+    def completion(**kw):
+        captured.append(kw["temperature"])
+        return response('{"ok": true}')
+
+    router = LLMRouter(DEPLOYMENT_TEMPERATURE, engine=engine, completion_fn=completion)
+    router.complete("qa", [{"role": "user", "content": "hi"}], temperature=0.9, use_cache=False)
+
+    assert captured == [0.9]
+
+
+CLOUD_LOCAL_CONFIG = {
+    "deployments": [
+        {"name": "cloud1", "model": "p/cloud1", "api_key_env": "KEY_A", "family": "fam1"},
+        {"name": "cloud2", "model": "p/cloud2", "api_key_env": "KEY_B", "family": "fam2"},
+        {"name": "local", "model": "ollama_chat/gemma4:e4b", "api_key_env": "KEY_A", "family": "gemma4"},
+    ],
+    "routes": {"extract": ["cloud1", "cloud2", "local"]},
+    "max_attempts_per_call": 6,
+    "max_cloud_attempts": 2,
+}
+
+
+def test_deployment_is_local_detects_ollama_chat_models():
+    from batterygemma.llm.router import Deployment
+
+    assert Deployment(name="x", model="ollama_chat/gemma4:e4b", api_key_env="K").is_local is True
+    assert Deployment(name="y", model="nvidia_nim/deepseek", api_key_env="K").is_local is False
+
+
+def test_switches_to_local_after_max_cloud_attempts_even_though_local_is_last_in_chain(engine):
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if kw["model"] == "ollama_chat/gemma4:e4b":
+            return response("ok")
+        raise RateLimitError("nope")
+
+    router = LLMRouter(CLOUD_LOCAL_CONFIG, engine=engine, completion_fn=completion)
+    result = router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    assert result.deployment == "local"
+    # both cloud deployments were tried once each (max_cloud_attempts=2), then local - not endless cloud retries
+    assert calls == ["p/cloud1", "p/cloud2", "ollama_chat/gemma4:e4b"]
+
+
+ALL_CLOUD_CONFIG = {
+    "deployments": [
+        {"name": "cloud1", "model": "p/cloud1", "api_key_env": "KEY_A", "family": "fam1"},
+        {"name": "cloud2", "model": "p/cloud2", "api_key_env": "KEY_B", "family": "fam2"},
+        {"name": "cloud3", "model": "p/cloud3", "api_key_env": "KEY_C", "family": "fam3"},
+    ],
+    "routes": {"extract": ["cloud1", "cloud2", "cloud3"]},
+    "max_attempts_per_call": 6,
+    "max_cloud_attempts": 2,
+}
+
+
+class ServiceUnavailableError(Exception):
+    """A generic transient failure - `_classify_error` falls through to \"error\" for this (no status_code,
+    no rate-limit-shaped name/message)."""
+
+
+def test_retries_the_same_deployment_before_moving_to_the_next_on_a_transient_error(engine):
+    """max_attempts_per_deployment=3: a deployment that keeps erroring gets 3 tries before the router gives
+    up on it and moves to the next one in the route - not 1, which would waste attempts falling back to a
+    weaker/less-reliable deployment on the very first transient hiccup of a normally-reliable one."""
+    config = {
+        "deployments": [
+            {"name": "strong", "model": "p/strong", "api_key_env": "KEY_A", "family": "fam1"},
+            {"name": "weak", "model": "p/weak", "api_key_env": "KEY_B", "family": "fam2"},
+        ],
+        "routes": {"extract": ["strong", "weak"]},
+        "cooldown": {"rate_limit_seconds": 60, "daily_quota_seconds": 86400, "error_seconds": 0},
+        "max_attempts_per_call": 10,
+        "max_attempts_per_deployment": 3,
+    }
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if kw["model"] == "p/strong" and calls.count("p/strong") <= 2:
+            raise ServiceUnavailableError("transient")
+        if kw["model"] == "p/strong":
+            return response("ok")
+        raise ServiceUnavailableError("should never reach weak")
+
+    router = LLMRouter(config, engine=engine, completion_fn=completion)
+    result = router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    assert result.deployment == "strong"
+    # 2 failed attempts on "strong", then a 3rd that succeeds - "weak" is never touched
+    assert calls == ["p/strong", "p/strong", "p/strong"]
+
+
+def test_retry_on_the_same_deployment_does_not_wait_out_its_own_error_cooldown(engine):
+    """Regression test for a real bug: `_attempt` sets a real cooldown_error wait (e.g. 30s) on a
+    deployment after a transient error, which would otherwise make `_next_deployment` skip straight past
+    it to the next deployment in the route (since it looks "cooling down") instead of retrying it - even
+    though max_attempts_per_deployment said it should get another immediate try first. Confirmed live: a
+    single nemotron-super error jumped straight to a less-reliable fallback instead of retrying nemotron."""
+    config = {
+        "deployments": [
+            {"name": "strong", "model": "p/strong", "api_key_env": "KEY_A", "family": "fam1"},
+            {"name": "weak", "model": "p/weak", "api_key_env": "KEY_B", "family": "fam2"},
+        ],
+        "routes": {"extract": ["strong", "weak"]},
+        "cooldown": {"rate_limit_seconds": 60, "daily_quota_seconds": 86400, "error_seconds": 30},
+        "max_attempts_per_call": 10,
+        "max_attempts_per_deployment": 3,
+    }
+    calls = []
+    slept: list[float] = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if kw["model"] == "p/strong" and calls.count("p/strong") <= 2:
+            raise ServiceUnavailableError("transient")
+        if kw["model"] == "p/strong":
+            return response("ok")
+        raise ServiceUnavailableError("should never reach weak")
+
+    router = LLMRouter(config, engine=engine, completion_fn=completion, sleep=slept.append)
+    result = router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    assert result.deployment == "strong"
+    assert calls == ["p/strong", "p/strong", "p/strong"]
+    assert slept == []  # no waiting out the 30s error cooldown between same-deployment retries
+
+
+def test_gives_up_on_a_deployment_after_max_attempts_per_deployment_and_moves_on(engine):
+    config = {
+        "deployments": [
+            {"name": "strong", "model": "p/strong", "api_key_env": "KEY_A", "family": "fam1"},
+            {"name": "weak", "model": "p/weak", "api_key_env": "KEY_B", "family": "fam2"},
+        ],
+        "routes": {"extract": ["strong", "weak"]},
+        "cooldown": {"rate_limit_seconds": 60, "daily_quota_seconds": 86400, "error_seconds": 0},
+        "max_attempts_per_call": 10,
+        "max_attempts_per_deployment": 3,
+    }
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if kw["model"] == "p/strong":
+            raise ServiceUnavailableError("always fails")
+        return response("ok")
+
+    router = LLMRouter(config, engine=engine, completion_fn=completion)
+    result = router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    assert result.deployment == "weak"
+    assert calls == ["p/strong", "p/strong", "p/strong", "p/weak"]
+
+
+def test_concurrent_calls_from_multiple_threads_do_not_crash_or_double_count_rpm(engine):
+    """`bg annotate --concurrency N` runs several batches through one shared LLMRouter from worker threads -
+    this is a smoke test for the locking added around `_next_deployment`/`_attempt`'s shared in-memory state
+    (`_cooldown_until`, `_disabled`, `_recent`). Each thread uses a distinct prompt (via a per-thread nonce
+    in the message) so the response cache doesn't short-circuit most of them down to one real call - the
+    point is exercising concurrent selection/reservation, not caching."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    config = {
+        "deployments": [{"name": "a", "model": "p/a", "api_key_env": "KEY_A", "family": "fam1", "rpm": 100}],
+        "routes": {"extract": ["a"]},
+        "cooldown": {"rate_limit_seconds": 60, "daily_quota_seconds": 86400, "error_seconds": 30},
+        "max_attempts_per_call": 5,
+    }
+    seen_models = []
+    lock = threading.Lock()
+
+    def completion(**kw):
+        time.sleep(0.01)  # encourage thread interleaving around the router's locked sections
+        with lock:
+            seen_models.append(kw["model"])
+        return response("ok")
+
+    router = LLMRouter(config, engine=engine, completion_fn=completion)
+
+    def call(i: int):
+        return router.complete("extract", [{"role": "user", "content": f"hi {i}"}], use_cache=False)
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(call, range(20)))
+
+    assert len(results) == 20
+    assert all(r.deployment == "a" for r in results)
+    assert len(seen_models) == 20  # every call actually reached the provider, none lost/duplicated
+
+
+def test_all_cloud_route_still_tries_every_deployment_past_max_cloud_attempts(engine, monkeypatch):
+    """A route with no local deployment at all must not be cut short after `max_cloud_attempts` - that cap
+    exists to jump to a *local* fallback sooner, not to give up on remaining cloud deployments. Regression
+    test for a real bug: with extract=[nemotron-super, glm-5.2, qwen3.8-27b] (no local fallback) and
+    max_cloud_attempts=2, qwen3.8-27b was never attempted after the first two failed."""
+    monkeypatch.setenv("KEY_C", "x")
+    calls = []
+
+    def completion(**kw):
+        calls.append(kw["model"])
+        if kw["model"] == "p/cloud3":
+            return response("ok")
+        raise RateLimitError("nope")
+
+    router = LLMRouter(ALL_CLOUD_CONFIG, engine=engine, completion_fn=completion)
+    result = router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    assert result.deployment == "cloud3"
+    assert calls == ["p/cloud1", "p/cloud2", "p/cloud3"]
+
+
+def test_logs_a_warning_when_switching_to_local(engine, caplog):
+    import logging
+
+    def completion(**kw):
+        if kw["model"] == "ollama_chat/gemma4:e4b":
+            return response("ok")
+        raise RateLimitError("nope")
+
+    router = LLMRouter(CLOUD_LOCAL_CONFIG, engine=engine, completion_fn=completion)
+    with caplog.at_level(logging.WARNING, logger="batterygemma.llm.router"):
+        router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    assert any("switching to local fallback" in r.message for r in caplog.records)
+
+
+def test_request_timeout_defaults_to_60s_and_is_configurable(engine):
+    captured = {}
+
+    def completion(**kw):
+        captured.update(kw)
+        return response("ok")
+
+    router = LLMRouter(CLOUD_LOCAL_CONFIG, engine=engine, completion_fn=completion)
+    router.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+    assert captured["timeout"] == 60
+
+    custom_config = {**CLOUD_LOCAL_CONFIG, "request_timeout_seconds": 15}
+    router2 = LLMRouter(custom_config, engine=engine, completion_fn=completion)
+    router2.complete("extract", [{"role": "user", "content": "hi"}], use_cache=False)
+    assert captured["timeout"] == 15
+
+
 def test_reasoning_is_persisted_and_survives_the_cache(engine):
     router = LLMRouter(REASONING_MODEL, engine=engine, completion_fn=lambda **kw: response("42", reasoning="steps..."))
     messages = [{"role": "user", "content": "compute"}]
@@ -288,3 +589,28 @@ def test_empty_content_with_reasoning_fails_over_instead_of_caching_blank_answer
     with get_session(engine) as s:
         bad = s.scalars(select(LLMCall).where(LLMCall.status == "invalid_output")).one()
     assert bad.reasoning_text == "spent the whole budget thinking"
+
+
+def test_successful_call_records_an_analytics_metric_row(engine):
+    from batterygemma.logs import LLMCallMetric, get_log_session
+
+    router, _ = make_router(engine, lambda model, n: "the answer")
+    router.complete("qa", [{"role": "user", "content": "hi"}], use_cache=False)
+
+    with get_log_session() as s:
+        row = s.scalars(select(LLMCallMetric)).one()
+    assert row.route == "qa" and row.deployment == "a" and row.status == "ok"
+    assert row.tokens_in == 10 and row.tokens_out == 5 and row.latency_ms is not None
+    assert row.hostname and row.cpu_count and row.python_version  # machine info populated
+
+
+def test_failed_call_still_records_a_metric_row_with_the_error(engine):
+    from batterygemma.logs import LLMCallMetric, get_log_session
+
+    router, _ = make_router(engine, lambda model, n: RateLimitError("nope"))
+    with pytest.raises(AllDeploymentsExhausted):
+        router.complete("qa", [{"role": "user", "content": "hi"}], use_cache=False, max_wait_seconds=0)
+
+    with get_log_session() as s:
+        rows = s.scalars(select(LLMCallMetric)).all()
+    assert rows and all(r.status == "rate_limited" and r.error for r in rows)

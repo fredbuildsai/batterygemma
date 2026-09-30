@@ -47,6 +47,8 @@ class Document(Base):
     status_reason: Mapped[str | None] = mapped_column(Text)
     split: Mapped[str | None] = mapped_column(String(8), index=True)
     duplicate_of: Mapped[str | None] = mapped_column(String(128))
+    blacklisted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    blacklist_reason: Mapped[str | None] = mapped_column(Text)
     raw_metadata: Mapped[dict[str, Any]] = mapped_column(default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -81,6 +83,9 @@ class Chunk(Base):
     overlap_prev_tokens: Mapped[int] = mapped_column(Integer, default=0)
     text: Mapped[str] = mapped_column(Text)
     captions: Mapped[list[Any]] = mapped_column(default=list)
+    images: Mapped[list[Any]] = mapped_column(default=list)  # figure filenames from this chunk's captions -
+                                                              # see images.py for how these resolve to actual
+                                                              # downloaded files under data/images/
     quality: Mapped[dict[str, Any]] = mapped_column(default=dict)
     purpose: Mapped[str] = mapped_column(String(8), default="sft")  # sft | cpt
 

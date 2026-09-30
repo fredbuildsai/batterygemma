@@ -42,6 +42,55 @@ def test_openalex_pages_with_cursor_and_maps_fields():
     assert "mailto" not in requests[0]
 
 
+def test_openalex_sends_api_key_as_bearer_header_not_query_param():
+    """A query-string secret is far more likely to end up in a proxy's/CDN's access log or used as a cache
+    key than a header value is - see OpenAlexSource._auth_headers' docstring."""
+    seen_headers = []
+    seen_params = []
+
+    def handler(request):
+        seen_headers.append(dict(request.headers))
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"meta": {"next_cursor": None}, "results": []})
+
+    list(OpenAlexSource(client_for(handler), api_key="secret-key-123").discover(["x"], limit=1))
+
+    assert seen_headers[0]["authorization"] == "Bearer secret-key-123"
+    assert "api_key" not in seen_params[0]
+    assert "secret-key-123" not in str(seen_params[0])
+
+
+def test_openalex_fields_none_requests_full_record_and_keeps_it_on_raw():
+    full_work = {
+        "id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/x", "title": "T", "publication_year": 2020,
+        "type": "article", "authorships": [], "abstract_inverted_index": None,
+        "best_oa_location": {"license": "cc-by"}, "primary_location": {}, "open_access": {"oa_status": "gold"},
+        "cited_by_count": 42, "topics": [{"display_name": "Battery Materials"}],  # not in DEFAULT_FIELDS
+    }
+    seen_params = []
+
+    def handler(request):
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"meta": {"next_cursor": None}, "results": [full_work]})
+
+    records = list(OpenAlexSource(client_for(handler), api_key="", fields=None).discover(["x"], limit=1))
+
+    assert "select" not in seen_params[0]
+    assert records[0].raw == full_work  # nothing OpenAlex returned is thrown away
+
+
+def test_openalex_custom_fields_list_is_sent_as_select():
+    seen_params = []
+
+    def handler(request):
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"meta": {"next_cursor": None}, "results": []})
+
+    list(OpenAlexSource(client_for(handler), api_key="", fields=["id", "title"]).discover(["x"], limit=1))
+
+    assert seen_params[0]["select"] == "id,title"
+
+
 def test_openalex_splits_limit_across_terms():
     def work(work_id):
         return {"id": f"https://openalex.org/{work_id}", "title": f"Paper {work_id}", "best_oa_location": {"license": "cc-by"}}
@@ -89,6 +138,26 @@ def test_crossref_merges_versions_and_takes_license_from_any_version():
     assert record.pdf_url.endswith("/v2")
     assert record.abstract == "Sulfite solvents tune solvation."
     assert record.raw["versions"] == ["10.26434/chemrxiv-2025-rvp45/v2", "10.26434/chemrxiv-2025-rvp45"]
+
+
+def test_crossref_fields_none_requests_full_record_and_keeps_versions_intact():
+    payload = {"message": {"next-cursor": None, "items": [
+        {"DOI": "10.26434/chemrxiv-2025-rvp45", "title": ["Sulfite electrolytes"],
+         "abstract": "Sulfite solvents.", "extra_field_not_in_default_select": "kept",
+         "author": [{"given": "Ada", "family": "Lovelace"}], "posted": {"date-parts": [[2025, 12, 1]]}},
+    ]}}
+    seen_params = []
+
+    def handler(request):
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, json=payload)
+
+    source = CrossrefChemRxivSource(client_for(handler), fields=None)
+    records = list(source.discover(["lithium-ion battery"], limit=10))
+
+    assert "select" not in seen_params[0]
+    assert records[0].raw["versions"] == ["10.26434/chemrxiv-2025-rvp45"]
+    assert records[0].raw["full"]["10.26434/chemrxiv-2025-rvp45"]["extra_field_not_in_default_select"] == "kept"
 
 
 def test_base_doi_strips_both_version_styles():

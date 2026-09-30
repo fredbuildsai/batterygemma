@@ -17,7 +17,7 @@ from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_fail
 from batterygemma.db.models import Chunk, Comparison, Fact, GenTask, Ideation
 from batterygemma.db.session import get_session
 from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import IdeationOut, json_validator
+from batterygemma.llm.schemas import IdeationOut, json_schema_response_format, json_validator
 
 MIN_FACTS_FOR_IDEATION = 2
 
@@ -68,7 +68,7 @@ def generate_ideation(
     """One LLM call for `chunk`, persisted as an Ideation row. Returns None if the model proposed no ideas."""
     result = router.complete(
         route, build_ideation_messages(chunk.text), validate=json_validator(IdeationOut),
-        json_mode=True, max_tokens=3000, use_cache=use_cache,
+        response_format=json_schema_response_format(IdeationOut), max_tokens=3000, use_cache=use_cache,
     )
     parsed: IdeationOut = result.parsed
 

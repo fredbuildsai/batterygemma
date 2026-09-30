@@ -46,19 +46,38 @@ def init_db(engine: Engine | None = None) -> None:
 
 
 def migrate(database_url: str | None = None) -> None:
-    """Bring a real database to the latest Alembic revision (use this instead of init_db)."""
+    """Bring a real database to the latest Alembic revision (use this instead of init_db).
+
+    Alembic applies `alembic.ini`'s `[loggers]` section via `logging.config.fileConfig`, which defaults to
+    `disable_existing_loggers=True` - that silently disables every *already-created* logger not listed there
+    (root/sqlalchemy/alembic only), `batterygemma`'s whole tree included, since those loggers are created at
+    module-import time, before this function ever runs. A disabled logger drops every record before even
+    checking its handlers, so this broke `bg logs` app-wide with no error anywhere - confirmed live: `.info()`
+    calls, an attached handler, everything looked right except `Logger.disabled` was `True`. Re-enabling the
+    `batterygemma` tree straight after is the fix, since Alembic's own fileConfig call is not itself
+    something this project's code controls the parameters of.
+    """
     from alembic import command
     from alembic.config import Config
 
-    from batterygemma.settings import PROJECT_ROOT
+    from batterygemma.settings import PACKAGE_ROOT
 
     url = database_url or get_settings().database_url
     if url.startswith("sqlite:///"):
         Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    config = Config(str(PROJECT_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    config = Config(str(PACKAGE_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PACKAGE_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
+    _reenable_batterygemma_loggers()
+
+
+def _reenable_batterygemma_loggers() -> None:
+    import logging
+
+    for name, obj in list(logging.Logger.manager.loggerDict.items()):
+        if isinstance(obj, logging.Logger) and (name == "batterygemma" or name.startswith("batterygemma.")):
+            obj.disabled = False
 
 
 @contextmanager

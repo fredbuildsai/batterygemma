@@ -69,7 +69,8 @@ def test_generate_false_premise_persists_a_grounded_expert_response(engine):
         stored = s.get(Negative, f"{CHUNK_ID}#negfp")
     assert stored.kind == "false_premise" and stored.status == "generated"
     assert "3.45" in stored.expert_response
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "FalsePremiseOut"
 
 
 def test_generate_false_premise_returns_none_when_model_finds_nothing(engine):

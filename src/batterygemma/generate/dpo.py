@@ -16,7 +16,7 @@ from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_fail
 from batterygemma.db.models import DPOPair, GenTask, QA
 from batterygemma.db.session import get_session
 from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import DPORejectionOut, json_validator
+from batterygemma.llm.schemas import DPORejectionOut, json_schema_response_format, json_validator
 
 SYSTEM_PROMPT = (
     "You are helping build a preference-tuning dataset for a lithium-ion battery materials model. Given a "
@@ -50,7 +50,7 @@ def generate_dpo_pair(
     question, answer = qa.turns[0]["content"], qa.turns[1]["content"]
     result = router.complete(
         route, build_dpo_messages(question, answer), validate=json_validator(DPORejectionOut),
-        json_mode=True, max_tokens=1500, use_cache=use_cache,
+        response_format=json_schema_response_format(DPORejectionOut), max_tokens=1500, use_cache=use_cache,
     )
     parsed: DPORejectionOut = result.parsed
 

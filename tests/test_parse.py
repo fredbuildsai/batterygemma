@@ -11,7 +11,8 @@ JATS = b"""<?xml version="1.0"?>
   <body>
     <sec><title>Introduction</title>
       <p>Layered oxides crack above 4.2 V [<xref ref-type="bibr" rid="b1">1</xref>,<xref ref-type="bibr" rid="b2">2</xref>], see <xref ref-type="fig" rid="f1">Fig. 1</xref>.</p>
-      <fig id="f1"><label>Fig. 1</label><caption><p>In situ XRD of the (003) reflection.</p></caption></fig>
+      <fig id="f1"><label>Fig. 1</label><caption><p>In situ XRD of the (003) reflection.</p></caption>
+        <graphic xlink:href="ncomms1234-f1.jpg"/></fig>
     </sec>
     <sec><title>Experimental</title>
       <sec><title>Electrochemical testing</title>
@@ -35,9 +36,11 @@ def test_parse_jats_sections_citations_formulas_and_captions():
     intro, methods = parsed.sections
     assert intro.paragraphs == ["Layered oxides crack above 4.2 V, see Fig. 1."]
     assert intro.captions == ["Fig. 1: In situ XRD of the (003) reflection."]
+    assert intro.caption_images == [["ncomms1234-f1.jpg"]]
     assert "$Q = It$" in methods.paragraphs[0]
     assert methods.captions[0].startswith("Table 1: Cycling conditions.")
     assert "C/3 | 4.4 V" in methods.captions[0]
+    assert methods.caption_images == [[]]  # the table-wrap has no <graphic> of its own
     assert all("Reference that must not appear" not in p for s in parsed.sections for p in s.paragraphs)
 
 
@@ -132,3 +135,24 @@ def test_chunks_respect_sections_targets_and_overlap():
     assert all(d.tokens <= 30 + 10 + 7 for d in results)  # target + overlap + one unit of slack
     assert conclusion[0].overlap_prev_tokens == 0  # overlap never crosses a section boundary
     assert split_sentences("First one. Second one.") == ["First one.", "Second one."]
+
+
+def test_chunk_images_flow_from_section_captions_to_the_first_chunk_only():
+    sentence = "Cracks expose fresh surface to the electrolyte."
+    long_paragraph = " ".join([sentence] * 12)
+    section = Section(
+        path=["Results"], section_type="results", paragraphs=[long_paragraph],
+        captions=["Fig. 2: SEM cross-section.", "Fig. 3: EDS map."],
+        caption_images=[["ncomms-f2.jpg"], ["ncomms-f3.jpg", "ncomms-f3.jpg"]],  # dupe on purpose
+    )
+    drafts = chunk_sections([section], words, target_tokens=30, max_tokens=60, overlap_tokens=10)
+    first, *rest = [d for d in drafts if d.section_index == 0]
+    assert first.images == ["ncomms-f2.jpg", "ncomms-f3.jpg"]  # flattened, deduped
+    assert all(d.images == [] for d in rest)
+
+
+def test_caption_only_section_carries_its_images_too():
+    section = Section(path=["Results"], section_type="results", paragraphs=[],
+                      captions=["Fig. 4: TEM image."], caption_images=[["ncomms-f4.jpg"]])
+    drafts = chunk_sections([section], words)
+    assert drafts[0].images == ["ncomms-f4.jpg"]

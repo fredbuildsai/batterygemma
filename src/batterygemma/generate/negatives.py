@@ -19,7 +19,7 @@ from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_fail
 from batterygemma.db.models import ClaimPair, Document, GenTask, Negative
 from batterygemma.db.session import get_session
 from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import FalsePremiseOut, json_validator
+from batterygemma.llm.schemas import FalsePremiseOut, json_schema_response_format, json_validator
 
 FALSE_PREMISE_SYSTEM_PROMPT = (
     "You are an expert lithium-ion battery materials scientist. Write one question that contains a specific, "
@@ -94,7 +94,7 @@ def generate_false_premise(
     """One LLM call for `chunk`; returns the persisted Negative row, or None if the model found nothing to use."""
     result = router.complete(
         route, build_false_premise_messages(chunk.text), validate=json_validator(FalsePremiseOut),
-        json_mode=True, max_tokens=1500, use_cache=use_cache,
+        response_format=json_schema_response_format(FalsePremiseOut), max_tokens=1500, use_cache=use_cache,
     )
     parsed: FalsePremiseOut = result.parsed
     row_id = f"{chunk.chunk_id}#negfp"
