@@ -220,7 +220,7 @@ __marimo__/
 .DS_Store
 
 # batterygemma data (raw papers, databases, exports, model outputs)
-data/
+/data/
 *.db
 outputs/
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from corpusforge.models import Chunk, Document, File
 
 from batterygemma.db.models import QA, DPOPair, Negative
@@ -154,6 +156,7 @@ def test_export_all_writes_every_file(engine, tmp_path):
 
 
 def test_exported_cpt_jsonl_is_loadable_by_load_cpt_dataset(engine, tmp_path):
+    pytest.importorskip("datasets")  # optional `train` extra
     from batterygemma.train.data import load_cpt_dataset
 
     seed(engine)
@@ -164,6 +167,7 @@ def test_exported_cpt_jsonl_is_loadable_by_load_cpt_dataset(engine, tmp_path):
 
 
 def test_exported_sft_jsonl_is_loadable_by_load_sft_dataset(engine, tmp_path):
+    pytest.importorskip("datasets")  # optional `train` extra
     from batterygemma.train.data import load_sft_dataset
 
     seed(engine)
