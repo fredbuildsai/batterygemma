@@ -9,14 +9,15 @@ docstring) - these pairs are exported for a future CUDA-based DPOTrainer run. Bu
 now means that step needs no new data work later, only a different machine.
 """
 
+from corpusforge.annotate.tasks import get_or_create_task, mark_done, mark_failed
+from corpusforge.models import GenTask
+from llmrouter_free import AllDeploymentsExhausted, LLMRouter, json_schema_response_format, json_validator
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import DPOPair, GenTask, QA
+from batterygemma.db.models import QA, DPOPair
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import DPORejectionOut, json_schema_response_format, json_validator
+from batterygemma.llm.schemas import DPORejectionOut
 
 SYSTEM_PROMPT = (
     "You are helping build a preference-tuning dataset for a lithium-ion battery materials model. Given a "

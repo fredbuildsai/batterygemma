@@ -12,10 +12,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from corpusforge.models import Document
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from batterygemma.db.models import Document, Ideation, Negative, QA
+from batterygemma.db.models import QA, Ideation, Negative
 
 # Plan's pilot targets (see plan's "Gold eval set" section); build_gold_set caps each category at whatever
 # is actually available, so a small corpus yields a small (but still correctly-shaped) benchmark.

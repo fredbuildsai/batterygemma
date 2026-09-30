@@ -1,6 +1,7 @@
+from corpusforge.models import Chunk, Document
 from sqlalchemy import select
 
-from batterygemma.db.models import QA, Chunk, Document
+from batterygemma.db.models import QA
 from batterygemma.db.session import get_session
 
 

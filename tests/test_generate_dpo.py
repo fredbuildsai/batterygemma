@@ -2,12 +2,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.db.models import Chunk, DPOPair, Document, GenTask, QA
+from batterygemma.db.models import QA, DPOPair
 from batterygemma.db.session import get_session
 from batterygemma.generate.dpo import annotate_qa_dpo, generate_dpo_pair
-from batterygemma.llm.router import LLMRouter
 
 QA_ID = "doc:1#s00-c00#qa0"
 

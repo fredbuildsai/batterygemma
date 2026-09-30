@@ -2,12 +2,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.db.models import Chunk, Document, GenTask, QA
+from batterygemma.db.models import QA
 from batterygemma.db.session import get_session
 from batterygemma.generate.qa import annotate_chunk_qa, generate_qa
-from batterygemma.llm.router import LLMRouter
 
 CHUNK_ID = "doc:1#s00-c00"
 CHUNK_TEXT = (

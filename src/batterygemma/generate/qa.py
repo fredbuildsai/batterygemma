@@ -6,15 +6,16 @@ why `annotate_chunk_qa` manages its own short-lived sessions around the LLM call
 long-lived session from the caller (SQLite deadlock risk when the router logs to llm_calls mid-transaction).
 """
 
+from corpusforge.annotate.grounding import is_grounded
+from corpusforge.annotate.tasks import get_or_create_task, mark_done, mark_failed
+from corpusforge.models import Chunk, GenTask
+from llmrouter_free import AllDeploymentsExhausted, LLMRouter, json_schema_response_format, json_validator
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.grounding import is_grounded
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import Chunk, GenTask, QA
+from batterygemma.db.models import QA
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import QAGenerationOut, QAItemOut, json_schema_response_format, json_validator
+from batterygemma.llm.schemas import QAGenerationOut, QAItemOut
 
 SYSTEM_PROMPT = (
     "You are an expert lithium-ion battery materials scientist writing training questions. Every answer "

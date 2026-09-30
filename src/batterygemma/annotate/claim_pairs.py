@@ -8,30 +8,20 @@ in stage 8, and both feed `bat-claim-pairs`. `sentence_1` is checked against the
 (see `annotate.grounding`); `sentence_2` for a contradiction is *supposed* to diverge from the source, so it
 is not checked.
 
-There is exactly one mechanism for 1 chunk or many, mirroring `annotate.facts`: `extract_claim_pairs`
-always takes a list of chunks and always uses the batch-shaped prompt/schema (`BatchClaimPairsOut`), even
-for a list of length 1.
-
-See `annotate.facts` module docstring for why `annotate_chunks_claims` manages its own short-lived sessions
-around the LLM call rather than accepting one long-lived session from the caller (SQLite deadlock risk).
+Like `annotate.facts`, this module is only the domain half of the stage (prompt, schema `BatchClaimPairsOut`,
+row builder, `CLAIMS_SPEC`); the batching, bookkeeping, retry and back-off mechanics are `corpusforge.runner`,
+and a single chunk is a batch of one.
 """
 
-import logging
-from datetime import datetime
-
-from rich.console import Console
-from sqlalchemy import Engine, delete, select
+from corpusforge.annotate.grounding import is_grounded
+from corpusforge.models import Chunk
+from corpusforge.runner import ChunkTaskSpec, run_batch
+from llmrouter_free import LLMRouter
+from sqlalchemy import Engine, delete
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.grounding import is_grounded
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import Chunk, ClaimPair, GenTask
-from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import BatchClaimPairsOut, ClaimPairOut, json_schema_response_format, json_validator
-
-logger = logging.getLogger(__name__)
-_console = Console()
+from batterygemma.db.models import ClaimPair
+from batterygemma.llm.schemas import BatchClaimPairsOut, ChunkClaimPairsOut, ClaimPairOut
 
 SYSTEM_PROMPT = (
     "You are an expert lithium-ion battery materials scientist writing claim pairs for a fact-checking "
@@ -85,90 +75,24 @@ def _pair_row(chunk: Chunk, index: int, pair: ClaimPairOut, *, generator_model: 
     )
 
 
-def extract_claim_pairs(
-    session: Session, router: LLMRouter, chunks: list[Chunk], *, route: str = "extract", use_cache: bool = True
-) -> dict[str, list[ClaimPair]]:
-    """One LLM call covering all of `chunks` (1 or more), persisted as ClaimPair rows keyed by chunk_id.
-    Replaces any previous rows for each chunk in `chunks`. A chunk_index missing from the LLM's response is
-    simply absent from the returned dict - the caller retries it by calling this function again with just
-    that chunk.
+def persist_claim_pairs(session: Session, chunk: Chunk, chunk_result: ChunkClaimPairsOut, model: str) -> dict[str, int]:
+    """Replace any earlier ClaimPair rows for `chunk` with rows built from `chunk_result`."""
+    session.execute(delete(ClaimPair).where(ClaimPair.id.like(f"{chunk.chunk_id}#pair%")))
+    pairs = [_pair_row(chunk, i, p, generator_model=model) for i, p in enumerate(chunk_result.pairs)]
+    session.add_all(pairs)
+    return {"pairs": len(pairs)}
 
-    Caller's responsibility: `session` must not already hold pending writes from earlier in the same
-    transaction (see `annotate.facts` module docstring for why).
-    """
-    result = router.complete(
-        route, build_claim_pair_messages([c.text for c in chunks]), validate=json_validator(BatchClaimPairsOut),
-        response_format=json_schema_response_format(BatchClaimPairsOut),
-        max_tokens=max(2000, 2000 * len(chunks)), use_cache=use_cache,
-        temperature=0,  # schema-constrained structured extraction: see annotate.facts for why
-    )
-    parsed: BatchClaimPairsOut = result.parsed
 
-    logger.info(
-        f"extract_claims call via {result.deployment} ({len(chunks)} chunks): "
-        f"tokens_in={result.tokens_in}, tokens_out={result.tokens_out}",
-        extra={"context": {"deployment": result.deployment, "chunks": len(chunks),
-                            "tokens_in": result.tokens_in, "tokens_out": result.tokens_out, "cached": result.cached}},
-    )
-    _console.print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] extract_claims via {result.deployment}: "
-                   f"tokens_in={result.tokens_in}, tokens_out={result.tokens_out} ({len(chunks)} chunks)"
-                   + (" [cached]" if result.cached else ""))
-
-    out: dict[str, list[ClaimPair]] = {}
-    for chunk_result in parsed.results:
-        if not (0 <= chunk_result.chunk_index < len(chunks)):
-            continue
-        chunk = chunks[chunk_result.chunk_index]
-        session.execute(delete(ClaimPair).where(ClaimPair.id.like(f"{chunk.chunk_id}#pair%")))
-        pairs = [_pair_row(chunk, i, p, generator_model=result.model) for i, p in enumerate(chunk_result.pairs)]
-        session.add_all(pairs)
-        out[chunk.chunk_id] = pairs
-    return out
+CLAIMS_SPEC = ChunkTaskSpec(
+    task_type="extract_claims", build_messages=build_claim_pair_messages, response_schema=BatchClaimPairsOut,
+    persist_result=persist_claim_pairs, output_tokens_per_chunk=2000,  # keep in sync with llm.context_budget
+    route="extract",
+)
 
 
 def annotate_chunks_claims(
-    engine: Engine, router: LLMRouter, chunk_ids: list[str], *, force: bool = False, _retry: bool = True
+    engine: Engine, router: LLMRouter, chunk_ids: list[str], *, force: bool = False
 ) -> dict[str, str]:
     """Resumable claim-pair generation over 1 or more chunk_ids in a single batched LLM call. Returns a
     {chunk_id: "done" | "skipped" | "failed"} map, one entry per input chunk_id."""
-    task_keys = {chunk_id: f"extract_claims:{chunk_id}" for chunk_id in chunk_ids}
-    pending: list[str] = []
-    outcomes: dict[str, str] = {}
-    with get_session(engine) as s:
-        for chunk_id in chunk_ids:
-            task = get_or_create_task(s, "extract_claims", task_keys[chunk_id])
-            if task.status == "done" and not force:
-                outcomes[chunk_id] = "skipped"
-                continue
-            task.attempts += 1
-            pending.append(chunk_id)
-    if not pending:
-        return outcomes
-
-    try:
-        with get_session(engine) as s:
-            chunks = [s.get(Chunk, chunk_id) for chunk_id in pending]
-            results = extract_claim_pairs(s, router, chunks, use_cache=not force)
-    except AllDeploymentsExhausted as exc:
-        with get_session(engine) as s:
-            for chunk_id in pending:
-                mark_failed(s.scalars(select(GenTask).where(GenTask.key == task_keys[chunk_id])).one(), str(exc))
-        outcomes.update({chunk_id: "failed" for chunk_id in pending})
-        return outcomes
-
-    missing = [chunk_id for chunk_id in pending if chunk_id not in results]
-    with get_session(engine) as s:
-        for chunk_id in pending:
-            if chunk_id not in results:
-                continue
-            payload = {"pairs": len(results[chunk_id])}
-            mark_done(s.scalars(select(GenTask).where(GenTask.key == task_keys[chunk_id])).one(), payload)
-            outcomes[chunk_id] = "done"
-
-    if missing and _retry:
-        # Retry, once, any chunk the LLM silently dropped from the batch response - same mechanism, applied
-        # to just the missing ids. `_retry=False` on the recursive call caps this at one extra attempt.
-        outcomes.update(annotate_chunks_claims(engine, router, missing, force=force, _retry=False))
-    elif missing:
-        outcomes.update({chunk_id: "failed" for chunk_id in missing})
-    return outcomes
+    return run_batch(engine, router, CLAIMS_SPEC, chunk_ids, force=force)

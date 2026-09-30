@@ -2,16 +2,17 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.db.models import Chunk, ClaimPair, Document, GenTask, Negative
+from batterygemma.db.models import ClaimPair, Negative
 from batterygemma.db.session import get_session
 from batterygemma.generate.negatives import (
     annotate_chunk_false_premise,
     derive_contradiction_negatives,
     generate_false_premise,
 )
-from batterygemma.llm.router import LLMRouter
 
 CHUNK_ID = "doc:1#s00-c00"
 CHUNK_TEXT = "LiFePO4 stores charge on a flat two-phase Fe2+/Fe3+ plateau near 3.45 V vs Li/Li+."

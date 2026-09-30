@@ -1,19 +1,16 @@
-"""initial schema
+"""baseline battery schema
 
-Revision ID: 2146bc16699b
+Revision ID: 0001
 Revises: 
-Create Date: 2026-09-13 16:13:34.925148
 """
-from collections.abc import Sequence
-
 import sqlalchemy as sa
+
 from alembic import op
 
-
-revision: str = '2146bc16699b'
-down_revision: str | None = None
-branch_labels: str | Sequence[str] | None = None
-depends_on: str | Sequence[str] | None = None
+revision = '0001'
+down_revision = None
+branch_labels = None
+depends_on = None
 
 
 def upgrade() -> None:
@@ -72,42 +69,6 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_comparisons_generator_model'), ['generator_model'], unique=False)
         batch_op.create_index(batch_op.f('ix_comparisons_split'), ['split'], unique=False)
         batch_op.create_index(batch_op.f('ix_comparisons_status'), ['status'], unique=False)
-
-    op.create_table('documents',
-    sa.Column('doc_id', sa.String(length=128), nullable=False),
-    sa.Column('source', sa.String(length=32), nullable=False),
-    sa.Column('external_id', sa.String(length=128), nullable=False),
-    sa.Column('doi', sa.String(length=255), nullable=True),
-    sa.Column('title', sa.Text(), nullable=False),
-    sa.Column('norm_title', sa.Text(), nullable=False),
-    sa.Column('authors', sa.JSON(), nullable=False),
-    sa.Column('year', sa.Integer(), nullable=True),
-    sa.Column('venue', sa.Text(), nullable=True),
-    sa.Column('abstract', sa.Text(), nullable=True),
-    sa.Column('url', sa.Text(), nullable=True),
-    sa.Column('pdf_url', sa.Text(), nullable=True),
-    sa.Column('xml_url', sa.Text(), nullable=True),
-    sa.Column('license', sa.String(length=64), nullable=True),
-    sa.Column('license_evidence', sa.Text(), nullable=True),
-    sa.Column('license_flagged', sa.Boolean(), nullable=False),
-    sa.Column('relevance', sa.Float(), nullable=True),
-    sa.Column('topic_tags', sa.JSON(), nullable=False),
-    sa.Column('status', sa.String(length=16), nullable=False),
-    sa.Column('status_reason', sa.Text(), nullable=True),
-    sa.Column('split', sa.String(length=8), nullable=True),
-    sa.Column('duplicate_of', sa.String(length=128), nullable=True),
-    sa.Column('raw_metadata', sa.JSON(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('doc_id')
-    )
-    with op.batch_alter_table('documents', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_documents_doi'), ['doi'], unique=False)
-        batch_op.create_index(batch_op.f('ix_documents_license'), ['license'], unique=False)
-        batch_op.create_index(batch_op.f('ix_documents_norm_title'), ['norm_title'], unique=False)
-        batch_op.create_index(batch_op.f('ix_documents_source'), ['source'], unique=False)
-        batch_op.create_index(batch_op.f('ix_documents_split'), ['split'], unique=False)
-        batch_op.create_index(batch_op.f('ix_documents_status'), ['status'], unique=False)
 
     op.create_table('dpo_pairs',
     sa.Column('source_qa_id', sa.String(length=64), nullable=True),
@@ -170,23 +131,6 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_facts_split'), ['split'], unique=False)
         batch_op.create_index(batch_op.f('ix_facts_status'), ['status'], unique=False)
 
-    op.create_table('gen_tasks',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('task_type', sa.String(length=40), nullable=False),
-    sa.Column('key', sa.String(length=200), nullable=False),
-    sa.Column('payload', sa.JSON(), nullable=False),
-    sa.Column('status', sa.String(length=16), nullable=False),
-    sa.Column('attempts', sa.Integer(), nullable=False),
-    sa.Column('last_error', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('key')
-    )
-    with op.batch_alter_table('gen_tasks', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_gen_tasks_status'), ['status'], unique=False)
-        batch_op.create_index(batch_op.f('ix_gen_tasks_task_type'), ['task_type'], unique=False)
-
     op.create_table('ideation',
     sa.Column('problem', sa.Text(), nullable=False),
     sa.Column('constraints', sa.JSON(), nullable=False),
@@ -221,29 +165,6 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_ideation_split'), ['split'], unique=False)
         batch_op.create_index(batch_op.f('ix_ideation_status'), ['status'], unique=False)
         batch_op.create_index(batch_op.f('ix_ideation_task_format'), ['task_format'], unique=False)
-
-    op.create_table('llm_calls',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('route', sa.String(length=32), nullable=False),
-    sa.Column('deployment', sa.String(length=64), nullable=False),
-    sa.Column('model', sa.String(length=128), nullable=False),
-    sa.Column('tier', sa.String(length=8), nullable=False),
-    sa.Column('prompt_hash', sa.String(length=64), nullable=False),
-    sa.Column('tokens_in', sa.Integer(), nullable=False),
-    sa.Column('tokens_out', sa.Integer(), nullable=False),
-    sa.Column('cost_usd', sa.Float(), nullable=False),
-    sa.Column('latency_ms', sa.Integer(), nullable=False),
-    sa.Column('status', sa.String(length=16), nullable=False),
-    sa.Column('error', sa.Text(), nullable=True),
-    sa.Column('response_text', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id')
-    )
-    with op.batch_alter_table('llm_calls', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_llm_calls_created_at'), ['created_at'], unique=False)
-        batch_op.create_index('ix_llm_calls_deployment_ts', ['deployment', 'created_at'], unique=False)
-        batch_op.create_index(batch_op.f('ix_llm_calls_prompt_hash'), ['prompt_hash'], unique=False)
-        batch_op.create_index(batch_op.f('ix_llm_calls_route'), ['route'], unique=False)
 
     op.create_table('materials',
     sa.Column('material_id', sa.String(length=64), nullable=False),
@@ -332,60 +253,11 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_qa_status'), ['status'], unique=False)
         batch_op.create_index(batch_op.f('ix_qa_task_format'), ['task_format'], unique=False)
 
-    op.create_table('releases',
-    sa.Column('version', sa.String(length=32), nullable=False),
-    sa.Column('filters', sa.JSON(), nullable=False),
-    sa.Column('counts', sa.JSON(), nullable=False),
-    sa.Column('content_hash', sa.String(length=64), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('version')
-    )
-    op.create_table('chunks',
-    sa.Column('chunk_id', sa.String(length=200), nullable=False),
-    sa.Column('doc_id', sa.String(length=128), nullable=False),
-    sa.Column('section_path', sa.JSON(), nullable=False),
-    sa.Column('section_type', sa.String(length=32), nullable=True),
-    sa.Column('order', sa.Integer(), nullable=False),
-    sa.Column('tokens', sa.Integer(), nullable=False),
-    sa.Column('overlap_prev_tokens', sa.Integer(), nullable=False),
-    sa.Column('text', sa.Text(), nullable=False),
-    sa.Column('captions', sa.JSON(), nullable=False),
-    sa.Column('quality', sa.JSON(), nullable=False),
-    sa.Column('purpose', sa.String(length=8), nullable=False),
-    sa.ForeignKeyConstraint(['doc_id'], ['documents.doc_id'], ),
-    sa.PrimaryKeyConstraint('chunk_id')
-    )
-    with op.batch_alter_table('chunks', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_chunks_doc_id'), ['doc_id'], unique=False)
-
-    op.create_table('files',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('doc_id', sa.String(length=128), nullable=False),
-    sa.Column('kind', sa.String(length=8), nullable=False),
-    sa.Column('path', sa.Text(), nullable=False),
-    sa.Column('sha256', sa.String(length=64), nullable=False),
-    sa.Column('bytes', sa.Integer(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['doc_id'], ['documents.doc_id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
-    with op.batch_alter_table('files', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_files_doc_id'), ['doc_id'], unique=False)
-
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
-    with op.batch_alter_table('files', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_files_doc_id'))
-
-    op.drop_table('files')
-    with op.batch_alter_table('chunks', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_chunks_doc_id'))
-
-    op.drop_table('chunks')
-    op.drop_table('releases')
     with op.batch_alter_table('qa', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_qa_task_format'))
         batch_op.drop_index(batch_op.f('ix_qa_status'))
@@ -411,13 +283,6 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_materials_formula'))
 
     op.drop_table('materials')
-    with op.batch_alter_table('llm_calls', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_llm_calls_route'))
-        batch_op.drop_index(batch_op.f('ix_llm_calls_prompt_hash'))
-        batch_op.drop_index('ix_llm_calls_deployment_ts')
-        batch_op.drop_index(batch_op.f('ix_llm_calls_created_at'))
-
-    op.drop_table('llm_calls')
     with op.batch_alter_table('ideation', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_ideation_task_format'))
         batch_op.drop_index(batch_op.f('ix_ideation_status'))
@@ -428,11 +293,6 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_ideation_component'))
 
     op.drop_table('ideation')
-    with op.batch_alter_table('gen_tasks', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_gen_tasks_task_type'))
-        batch_op.drop_index(batch_op.f('ix_gen_tasks_status'))
-
-    op.drop_table('gen_tasks')
     with op.batch_alter_table('facts', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_facts_status'))
         batch_op.drop_index(batch_op.f('ix_facts_split'))
@@ -449,15 +309,6 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_dpo_pairs_component'))
 
     op.drop_table('dpo_pairs')
-    with op.batch_alter_table('documents', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_documents_status'))
-        batch_op.drop_index(batch_op.f('ix_documents_split'))
-        batch_op.drop_index(batch_op.f('ix_documents_source'))
-        batch_op.drop_index(batch_op.f('ix_documents_norm_title'))
-        batch_op.drop_index(batch_op.f('ix_documents_license'))
-        batch_op.drop_index(batch_op.f('ix_documents_doi'))
-
-    op.drop_table('documents')
     with op.batch_alter_table('comparisons', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_comparisons_status'))
         batch_op.drop_index(batch_op.f('ix_comparisons_split'))

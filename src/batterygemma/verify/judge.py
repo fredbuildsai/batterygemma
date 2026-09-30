@@ -11,14 +11,15 @@ around the LLM call (SQLite deadlock risk).
 
 from typing import Any
 
+from corpusforge.annotate.tasks import get_or_create_task, mark_done, mark_failed
+from corpusforge.models import GenTask
+from llmrouter_free import AllDeploymentsExhausted, LLMRouter, json_schema_response_format, json_validator
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import GenTask, Ideation, QA
+from batterygemma.db.models import QA, Ideation
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import IdeationJudgeOut, QAJudgeOut, json_schema_response_format, json_validator
+from batterygemma.llm.schemas import IdeationJudgeOut, QAJudgeOut
 
 QA_JUDGE_SYSTEM_PROMPT = (
     "You are grading a training example for a lithium-ion battery materials expert model. Score the answer "
@@ -71,7 +72,7 @@ def judge_qa(
     session: Session, router: LLMRouter, qa: QA, *, route: str = "judge", use_cache: bool = True
 ) -> QAJudgeOut:
     """One LLM call scoring `qa`, applied in place. `qa.status` becomes accepted/rejected accordingly."""
-    from batterygemma.db.models import Chunk
+    from corpusforge.models import Chunk
 
     chunk_text = "\n\n".join(
         c.text for c in session.scalars(select(Chunk).where(Chunk.chunk_id.in_(qa.chunk_ids))).all()
@@ -99,7 +100,7 @@ def judge_ideation(
     session: Session, router: LLMRouter, ideation: Ideation, *, route: str = "judge", use_cache: bool = True
 ) -> IdeationJudgeOut:
     """One LLM call scoring `ideation`, applied in place."""
-    from batterygemma.db.models import Chunk
+    from corpusforge.models import Chunk
 
     chunk_text = "\n\n".join(
         c.text for c in session.scalars(select(Chunk).where(Chunk.chunk_id.in_(ideation.chunk_ids))).all()

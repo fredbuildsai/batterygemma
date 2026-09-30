@@ -1,6 +1,8 @@
 import json
 
-from batterygemma.db.models import Chunk, DPOPair, Document, File, Negative, QA
+from corpusforge.models import Chunk, Document, File
+
+from batterygemma.db.models import QA, DPOPair, Negative
 from batterygemma.db.session import get_session
 from batterygemma.export.unsloth_jsonl import export_all, export_cpt, export_dpo, export_sft
 

@@ -1,3 +1,1 @@
-from batterygemma.llm.router import AllDeploymentsExhausted, Deployment, LLMResult, LLMRouter
-
-__all__ = ["AllDeploymentsExhausted", "Deployment", "LLMResult", "LLMRouter"]
+"""Battery-specific LLM pieces: output schemas and per-task context budgets. The router is `llmrouter_free`."""

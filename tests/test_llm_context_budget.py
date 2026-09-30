@@ -1,94 +1,54 @@
-from batterygemma.llm.context_budget import (
-    apply_global_num_ctx,
-    compute_num_ctx,
-    fits_within,
-    global_num_ctx,
-    measured_overheads,
-    measure_template_overhead,
-    recommend_num_ctx,
-    round_up_to_bucket,
-)
+"""batterygemma's task registry for local-model context sizing (the arithmetic itself is tested in llmrouter-free)."""
+
+from llmrouter_free import TaskBudget
+
+from batterygemma.annotate.claim_pairs import CLAIMS_SPEC
+from batterygemma.annotate.facts import FACTS_SPEC
+from batterygemma.llm.context_budget import BATCHABLE_TASKS, TASK_OUTPUT_TOKENS, recommend, task_budgets
 
 
 def word_counter(text: str) -> int:
     return len(text.split())
 
 
-def test_round_up_to_bucket():
-    assert round_up_to_bucket(1, 1024) == 1024
-    assert round_up_to_bucket(1024, 1024) == 1024
-    assert round_up_to_bucket(1025, 1024) == 2048
+def test_every_registered_task_has_a_measured_budget_from_the_real_prompts():
+    budgets = task_budgets()
+    assert set(budgets) == set(TASK_OUTPUT_TOKENS)
+    assert all(isinstance(b, TaskBudget) and b.system_prompt for b in budgets.values())
+    assert {name for name, b in budgets.items() if b.batchable} == BATCHABLE_TASKS
 
 
-def test_measure_template_overhead_sums_system_and_template():
-    assert measure_template_overhead("one two", "three four five", word_counter) == 5
+def test_output_budgets_in_the_registry_match_the_stage_specs():
+    """The registry and the specs are kept in sync by hand; this fails if one is edited without the other."""
+    assert FACTS_SPEC.output_tokens_per_chunk == TASK_OUTPUT_TOKENS["extract_facts"]
+    assert CLAIMS_SPEC.output_tokens_per_chunk == TASK_OUTPUT_TOKENS["extract_claims"]
+    assert FACTS_SPEC.task_type in TASK_OUTPUT_TOKENS and CLAIMS_SPEC.task_type in TASK_OUTPUT_TOKENS
 
 
-def test_compute_num_ctx_applies_buffer_and_rounds_up():
-    # worst_case = 900 + 380 + 3000 = 4280; *1.2 = 5136; rounded up to 1024 -> 6144
-    assert compute_num_ctx(chunk_max_tokens=900, template_overhead_tokens=380, output_tokens=3000) == 6144
-
-
-def test_compute_num_ctx_respects_custom_buffer_and_bucket():
-    # worst_case = 100; *1.5 = 150; rounded up to 100 -> 200
-    assert compute_num_ctx(chunk_max_tokens=50, template_overhead_tokens=30, output_tokens=20,
-                           buffer=0.5, bucket=100) == 200
-
-
-def test_global_num_ctx_uses_the_largest_task():
-    tasks = {"small": 100, "big": 3000}
-    result = global_num_ctx(chunk_max_tokens=900, template_overhead_tokens=380, tasks=tasks)
-    assert result == compute_num_ctx(chunk_max_tokens=900, template_overhead_tokens=380, output_tokens=3000)
-
-
-def test_fits_within():
-    assert fits_within(8192, chunk_max_tokens=900, template_overhead_tokens=380, output_tokens=3000)
-    assert not fits_within(2048, chunk_max_tokens=900, template_overhead_tokens=380, output_tokens=3000)
-
-
-def test_measured_overheads_covers_every_task_with_positive_real_values():
-    overheads = measured_overheads(word_counter)
-    from batterygemma.llm.context_budget import TASK_OUTPUT_TOKENS
-
-    assert set(overheads) == set(TASK_OUTPUT_TOKENS)
-    assert all(v > 0 for v in overheads.values())
-
-
-def test_recommend_num_ctx_report_shape_and_consistency():
-    report = recommend_num_ctx(chunk_max_tokens=900, count_tokens=word_counter)
-    assert report["chunk_max_tokens"] == 900
-    assert report["batch_size"] == 1
-    assert set(report["overheads"]) == set(report["per_task_num_ctx"])
-    assert report["global_num_ctx"] == max(report["per_task_num_ctx"].values())
-
-
-def test_recommend_num_ctx_scales_only_the_batchable_extract_tasks_with_batch_size():
-    solo = recommend_num_ctx(chunk_max_tokens=900, count_tokens=word_counter, batch_size=1)
-    batched = recommend_num_ctx(chunk_max_tokens=900, count_tokens=word_counter, batch_size=5)
-
-    # extract_facts/extract_claims bundle batch_size chunks' text and output into one call, so their
-    # num_ctx must grow with batch_size...
-    assert batched["per_task_num_ctx"]["extract_facts"] > solo["per_task_num_ctx"]["extract_facts"]
-    assert batched["per_task_num_ctx"]["extract_claims"] > solo["per_task_num_ctx"]["extract_claims"]
-    # ...but every other task is always exactly one chunk/item per call, batch_size or not.
-    assert batched["per_task_num_ctx"]["generate_qa"] == solo["per_task_num_ctx"]["generate_qa"]
-    assert batched["per_task_num_ctx"]["judge"] == solo["per_task_num_ctx"]["judge"]
-
-
-def test_apply_global_num_ctx_only_touches_ollama_deployments_and_preserves_other_extra_body():
-    config = {
-        "deployments": [
-            {"name": "cloud", "model": "nvidia_nim/deepseek", "extra_body": {"chat_template_kwargs": {"thinking": True}}},
-            {"name": "local", "model": "ollama_chat/gemma4:e4b", "extra_body": {"think": False}},
-            {"name": "local-bare", "model": "ollama_chat/gemma3:4b"},
-        ],
-        "routes": {},
+def test_recommend_reproduces_the_pre_split_numbers_exactly():
+    """Golden values computed with the monolithic pre-split implementation (word counter, 900-token chunks)."""
+    solo = recommend(chunk_max_tokens=900, count_tokens=word_counter, batch_size=1)
+    assert solo["overheads"] == {
+        "extract_facts": 681, "extract_claims": 211, "generate_qa": 163, "generate_negatives": 150,
+        "generate_dpo": 95, "generate_ideation": 135, "judge": 56,
     }
-    patched = apply_global_num_ctx(config, 6144)
+    assert solo["per_task_num_ctx"] == {
+        "extract_facts": 6144, "extract_claims": 4096, "generate_qa": 5120, "generate_negatives": 3072,
+        "generate_dpo": 3072, "generate_ideation": 5120, "judge": 3072,
+    }
+    assert solo["global_num_ctx"] == 6144
 
-    by_name = {d["name"]: d for d in patched["deployments"]}
-    assert by_name["cloud"]["extra_body"] == {"chat_template_kwargs": {"thinking": True}}  # untouched
-    assert by_name["local"]["extra_body"] == {"think": False, "options": {"num_ctx": 6144}}
-    assert by_name["local-bare"]["extra_body"] == {"options": {"num_ctx": 6144}}
-    # original config is not mutated
-    assert "options" not in config["deployments"][1]["extra_body"]
+    batched = recommend(chunk_max_tokens=900, count_tokens=word_counter, batch_size=5)
+    assert batched["per_task_num_ctx"]["extract_facts"] == 24576
+    assert batched["per_task_num_ctx"]["extract_claims"] == 18432
+    assert batched["per_task_num_ctx"]["generate_qa"] == 5120  # never batched
+    assert batched["global_num_ctx"] == 24576
+
+
+def test_only_the_batchable_extract_tasks_scale_with_batch_size():
+    solo = recommend(chunk_max_tokens=900, count_tokens=word_counter, batch_size=1)
+    batched = recommend(chunk_max_tokens=900, count_tokens=word_counter, batch_size=5)
+    for task in BATCHABLE_TASKS:
+        assert batched["per_task_num_ctx"][task] > solo["per_task_num_ctx"][task]
+    for task in set(TASK_OUTPUT_TOKENS) - BATCHABLE_TASKS:
+        assert batched["per_task_num_ctx"][task] == solo["per_task_num_ctx"][task]

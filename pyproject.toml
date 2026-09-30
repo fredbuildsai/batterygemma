@@ -6,6 +6,8 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "llmrouter-free @ git+https://github.com/fredbuildsai/llmrouter-free.git@v0.1.0",
+    "corpusforge @ git+https://github.com/fredbuildsai/corpusforge.git@v0.1.0",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "pydantic>=2.7",
@@ -16,15 +18,14 @@ dependencies = [
     "pyyaml>=6.0",
     "httpx>=0.27",
     "tenacity>=8.3",
-    "litellm>=1.40",
     "tokenizers>=0.19",
 ]
 
 [project.optional-dependencies]
-parse = ["docling>=2.0", "lxml>=5.2"]
-dedupe = ["datasketch>=1.6"]
+parse = ["corpusforge[parse]"]
+dedupe = ["corpusforge[dedupe]"]
 train = ["unsloth", "trl", "datasets", "psutil>=6.0"]
-dev = ["pytest>=8.2", "respx>=0.21"]
+dev = ["pytest>=8.2", "respx>=0.21", "ruff>=0.5"]
 
 [project.scripts]
 bg = "batterygemma.cli:app"
@@ -33,8 +34,28 @@ bg = "batterygemma.cli:app"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/batterygemma"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+# Local development: use the sibling checkouts instead of the GitHub tags (ignored by pip / end users;
+# scripts/setup.sh --dev clones the siblings for you).
+llmrouter-free = { path = "../llmrouter-free", editable = true }
+corpusforge = { path = "../corpusforge", editable = true }
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501", "B008", "B023"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E731"]

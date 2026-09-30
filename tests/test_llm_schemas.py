@@ -1,4 +1,5 @@
 import pytest
+from llmrouter_free import json_validator
 
 from batterygemma.llm.schemas import (
     BatchClaimPairsOut,
@@ -9,7 +10,6 @@ from batterygemma.llm.schemas import (
     IdeationOut,
     QAGenerationOut,
     QAJudgeOut,
-    json_validator,
 )
 
 VALID_CHUNK_EXTRACTION = {
@@ -214,7 +214,7 @@ def test_ideation_judge_rejects_out_of_range_scores():
 
 
 def test_json_schema_response_format_shape():
-    from batterygemma.llm.schemas import json_schema_response_format
+    from llmrouter_free import json_schema_response_format
 
     rf = json_schema_response_format(BatchExtractionOut)
     assert rf["type"] == "json_schema"

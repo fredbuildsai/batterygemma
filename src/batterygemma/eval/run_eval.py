@@ -19,12 +19,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from corpusforge.models import Chunk
+from llmrouter_free import LLMRouter, json_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from batterygemma.db.models import Chunk
-from batterygemma.llm.router import LLMRouter
-from batterygemma.llm.schemas import IdeationJudgeOut, NegativeDetectionJudgeOut, OpenAnswerJudgeOut, json_validator
+from batterygemma.llm.schemas import IdeationJudgeOut, NegativeDetectionJudgeOut, OpenAnswerJudgeOut
 
 GenerateFn = Callable[[list[dict[str, str]]], str]
 

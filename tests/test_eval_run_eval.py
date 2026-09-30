@@ -2,11 +2,11 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document
+from llmrouter_free import LLMRouter
 
-from batterygemma.db.models import Chunk, Document
 from batterygemma.db.session import get_session
 from batterygemma.eval.run_eval import run_eval, score_closed_qa
-from batterygemma.llm.router import LLMRouter
 
 CONFIG = {
     "deployments": [

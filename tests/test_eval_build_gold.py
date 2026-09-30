@@ -1,4 +1,6 @@
-from batterygemma.db.models import Document, Ideation, Negative, QA
+from corpusforge.models import Document
+
+from batterygemma.db.models import QA, Ideation, Negative
 from batterygemma.db.session import get_session
 from batterygemma.eval.build_gold import build_gold_set
 

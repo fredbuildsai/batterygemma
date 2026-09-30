@@ -5,42 +5,23 @@ direction) are the base layer the plan describes; the derived layer (Q&A, ideati
 is built from these plus the raw chunks. Every fact/comparison carries an `evidence_sentence`, which is
 checked against the source chunk (see `annotate.grounding`) before being accepted.
 
-There is exactly one extraction mechanism for 1 chunk or many: `extract_facts_and_comparisons` always takes
-a list of chunks and always uses the batch-shaped prompt/schema (`BatchExtractionOut`), even for a list of
-length 1 - bundling several chunks' excerpts into one LLM call is what lets `bg annotate facts` cut the
-number of API calls roughly in proportion to the batch size. A single-chunk call is just the batch mechanism
-applied to a list of one; there is deliberately no separate single-chunk code path.
-
-`annotate_chunks_facts` (the resumable, engine-level entry point used by `bg annotate facts`) deliberately
-never holds a database transaction open across the LLM call: `router.complete()` writes its own `llm_calls`
-row through an independent session on the same SQLite file, and on file-based SQLite two overlapping write
-transactions from the same process will deadlock (each waits for the other's commit) rather than merely
-queue. Task bookkeeping (before) and result persistence (after) each get their own short, fully-committed
-session; only the request/response round trip happens with no open transaction at all.
+This module is only the *domain* half of the stage: the prompt (`build_extraction_messages`), the response
+schema (`BatchExtractionOut`) and how one chunk's result becomes `Fact`/`Comparison` rows (`persist_facts`),
+bundled as `FACTS_SPEC`. Everything mechanical - one router call for 1 or N chunks, `gen_tasks` bookkeeping,
+retrying chunks the model dropped, back-off, concurrency, never holding a transaction across the LLM call - is
+`corpusforge.runner`, shared with every other stage. A single chunk is just a batch of one; there is
+deliberately no separate single-chunk code path.
 """
 
-import logging
-from datetime import datetime
-
-from rich.console import Console
-from sqlalchemy import Engine, delete, select
+from corpusforge.annotate.grounding import is_grounded
+from corpusforge.models import Chunk
+from corpusforge.runner import ChunkTaskSpec, run_batch
+from llmrouter_free import LLMRouter
+from sqlalchemy import Engine, delete
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.grounding import is_grounded
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import Chunk, Comparison, Fact, GenTask
-from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import (
-    BatchExtractionOut,
-    ComparisonOut,
-    FactOut,
-    json_schema_response_format,
-    json_validator,
-)
-
-logger = logging.getLogger(__name__)
-_console = Console()
+from batterygemma.db.models import Comparison, Fact
+from batterygemma.llm.schemas import BatchExtractionOut, ChunkExtractionOut, ComparisonOut, FactOut
 
 SYSTEM_PROMPT = (
     "You are an expert lithium-ion battery materials scientist extracting structured facts from paper "
@@ -156,103 +137,27 @@ def _comparison_row(chunk: Chunk, index: int, comp: ComparisonOut, *, generator_
     )
 
 
-def extract_facts_and_comparisons(
-    session: Session, router: LLMRouter, chunks: list[Chunk], *, route: str = "extract", use_cache: bool = True
-) -> dict[str, tuple[list[Fact], list[Comparison]]]:
-    """One LLM call covering all of `chunks` (1 or more), persisted as Fact/Comparison rows keyed by
-    chunk_id. Replaces any previous rows for each chunk in `chunks`. A chunk_index missing from the LLM's
-    response (it's expected to return one result per excerpt, but isn't guaranteed to) is simply absent
-    from the returned dict - the caller retries it by calling this function again with just that chunk.
+def persist_facts(session: Session, chunk: Chunk, chunk_result: ChunkExtractionOut, model: str) -> dict[str, int]:
+    """Replace any earlier Fact/Comparison rows for `chunk` with rows built from `chunk_result`."""
+    session.execute(delete(Fact).where(Fact.id.like(f"{chunk.chunk_id}#fact%")))
+    session.execute(delete(Comparison).where(Comparison.id.like(f"{chunk.chunk_id}#cmp%")))
+    facts = [_fact_row(chunk, i, f, generator_model=model) for i, f in enumerate(chunk_result.facts)]
+    comparisons = [_comparison_row(chunk, i, c, generator_model=model) for i, c in enumerate(chunk_result.comparisons)]
+    session.add_all([*facts, *comparisons])
+    return {"facts": len(facts), "comparisons": len(comparisons)}
 
-    Caller's responsibility: `session` must not already hold pending writes from earlier in the same
-    transaction (see the module docstring for why) - open a fresh session and call this first if unsure.
-    """
-    result = router.complete(
-        route, build_extraction_messages([c.text for c in chunks]), validate=json_validator(BatchExtractionOut),
-        response_format=json_schema_response_format(BatchExtractionOut),
-        max_tokens=max(3000, 3000 * len(chunks)), use_cache=use_cache,
-        temperature=0,  # schema-constrained structured extraction: verified live (2026-09-15) that temperature=0
-                        # gives the most consistent, fully-populated JSON for both Nemotron and local gemma4:e4b
-    )
-    parsed: BatchExtractionOut = result.parsed
 
-    logger.info(
-        f"extract_facts call via {result.deployment} ({len(chunks)} chunks): "
-        f"tokens_in={result.tokens_in}, tokens_out={result.tokens_out}",
-        extra={"context": {"deployment": result.deployment, "chunks": len(chunks),
-                            "tokens_in": result.tokens_in, "tokens_out": result.tokens_out, "cached": result.cached}},
-    )
-    _console.print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] extract_facts via {result.deployment}: "
-                   f"tokens_in={result.tokens_in}, tokens_out={result.tokens_out} ({len(chunks)} chunks)"
-                   + (" [cached]" if result.cached else ""))
-
-    out: dict[str, tuple[list[Fact], list[Comparison]]] = {}
-    for chunk_result in parsed.results:
-        if not (0 <= chunk_result.chunk_index < len(chunks)):
-            continue
-        chunk = chunks[chunk_result.chunk_index]
-        session.execute(delete(Fact).where(Fact.id.like(f"{chunk.chunk_id}#fact%")))
-        session.execute(delete(Comparison).where(Comparison.id.like(f"{chunk.chunk_id}#cmp%")))
-        facts = [_fact_row(chunk, i, f, generator_model=result.model) for i, f in enumerate(chunk_result.facts)]
-        comparisons = [_comparison_row(chunk, i, c, generator_model=result.model)
-                       for i, c in enumerate(chunk_result.comparisons)]
-        session.add_all([*facts, *comparisons])
-        out[chunk.chunk_id] = (facts, comparisons)
-    return out
+FACTS_SPEC = ChunkTaskSpec(
+    task_type="extract_facts", build_messages=build_extraction_messages, response_schema=BatchExtractionOut,
+    persist_result=persist_facts, output_tokens_per_chunk=3000,  # keep in sync with llm.context_budget
+    route="extract",  # temperature 0 (the runner's default): verified live (2026-09-15) to give the most
+                      # consistent, fully-populated JSON for both Nemotron and local gemma4:e4b
+)
 
 
 def annotate_chunks_facts(
-    engine: Engine, router: LLMRouter, chunk_ids: list[str], *, force: bool = False, _retry: bool = True
+    engine: Engine, router: LLMRouter, chunk_ids: list[str], *, force: bool = False
 ) -> dict[str, str]:
     """Resumable extraction over 1 or more chunk_ids in a single batched LLM call. Returns a
-    {chunk_id: "done" | "skipped" | "failed"} map, one entry per input chunk_id.
-
-    `force=True` also bypasses the router's response cache - otherwise re-running with the identical prompt
-    would just replay the same cached answer, defeating the point of forcing a re-run.
-    """
-    task_keys = {chunk_id: f"extract_facts:{chunk_id}" for chunk_id in chunk_ids}
-    pending: list[str] = []
-    outcomes: dict[str, str] = {}
-    with get_session(engine) as s:
-        for chunk_id in chunk_ids:
-            task = get_or_create_task(s, "extract_facts", task_keys[chunk_id])
-            if task.status == "done" and not force:
-                outcomes[chunk_id] = "skipped"
-                continue
-            task.attempts += 1
-            pending.append(chunk_id)
-    if not pending:
-        return outcomes
-    # committed and closed above: no open transaction while the router call (and its own DB writes) runs
-
-    try:
-        with get_session(engine) as s:
-            chunks = [s.get(Chunk, chunk_id) for chunk_id in pending]
-            results = extract_facts_and_comparisons(s, router, chunks, use_cache=not force)
-    except AllDeploymentsExhausted as exc:
-        with get_session(engine) as s:
-            for chunk_id in pending:
-                mark_failed(s.scalars(select(GenTask).where(GenTask.key == task_keys[chunk_id])).one(), str(exc))
-        outcomes.update({chunk_id: "failed" for chunk_id in pending})
-        return outcomes
-
-    missing = [chunk_id for chunk_id in pending if chunk_id not in results]
-    with get_session(engine) as s:
-        for chunk_id in pending:
-            if chunk_id not in results:
-                continue
-            facts, comparisons = results[chunk_id]
-            payload = {"facts": len(facts), "comparisons": len(comparisons)}
-            mark_done(s.scalars(select(GenTask).where(GenTask.key == task_keys[chunk_id])).one(), payload)
-            outcomes[chunk_id] = "done"
-
-    if missing and _retry:
-        # Retry, once, any chunk the LLM silently dropped from the batch response - same mechanism, applied
-        # to just the missing ids (a singleton list when only one was dropped). `_retry=False` on the
-        # recursive call caps this at a single extra attempt per chunk, so a chunk the model keeps refusing
-        # to return still terminates as "failed" instead of looping forever.
-        retried = annotate_chunks_facts(engine, router, missing, force=force, _retry=False)
-        outcomes.update(retried)
-    elif missing:
-        outcomes.update({chunk_id: "failed" for chunk_id in missing})
-    return outcomes
+    {chunk_id: "done" | "skipped" | "failed"} map, one entry per input chunk_id."""
+    return run_batch(engine, router, FACTS_SPEC, chunk_ids, force=force)

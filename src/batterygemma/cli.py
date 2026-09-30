@@ -1,18 +1,30 @@
+"""The `bg` command line: corpusforge's pipeline commands plus batterygemma's annotate/generate/judge/export/
+train/eval stages.
+
+`bg discover|screen|fetch|images|add-local|parse|fetch-failures|pipeline-failures|blacklist*` and `bg logs` are
+corpusforge's own commands, registered here unchanged (so `scripts/*.sh` and muscle memory keep working);
+everything below them is battery-specific.
+"""
+
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
 import typer
+from corpusforge import models as cf
+from corpusforge.cli import logs_app, register_pipeline_commands
+from corpusforge.logs import configure_logging
+from corpusforge.runner import load_chunk_ids_filter, pending_chunk_ids
+from llmrouter_free import AllDeploymentsExhausted, LLMRouter
+from llmrouter_free.store import LLMCall
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import func, select
 
 from batterygemma.db import get_session
 from batterygemma.db import models as m
-from batterygemma.db.session import get_engine, migrate
-from batterygemma.llm import AllDeploymentsExhausted, LLMRouter
-from batterygemma.logs import configure_logging
+from batterygemma.db.session import LOGGER_ROOTS, get_engine, migrate
 from batterygemma.settings import get_settings, load_config
 
 app = typer.Typer(help="BatteryGemma data pipeline", no_args_is_help=True)
@@ -22,14 +34,12 @@ train_app = typer.Typer(help="Training commands (CPT/SFT via Unsloth's MLX backe
                         no_args_is_help=True)
 eval_app = typer.Typer(help="Stage 11: build the gold benchmark and score a model against it",
                        no_args_is_help=True)
-logs_app = typer.Typer(help="Query the structured application log (data/logs.db)", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(llm_app, name="llm")
 app.add_typer(train_app, name="train")
 app.add_typer(eval_app, name="eval")
 app.add_typer(logs_app, name="logs")
 console = Console()
-fetch_logger = logging.getLogger("batterygemma.fetch")
 annotate_logger = logging.getLogger("batterygemma.annotate")
 
 
@@ -45,34 +55,37 @@ def _confirm(prompt: str, auto: bool) -> bool:
 
 @app.callback()
 def _main(verbose: bool = typer.Option(False, "--verbose", help="Log at DEBUG instead of INFO")) -> None:
-    """Runs before every command: attaches the structured DB log handler (see `bg logs`)."""
-    configure_logging(logging.DEBUG if verbose else logging.INFO)
+    """Runs before every command: installs batterygemma's settings into corpusforge (so the registered
+    corpusforge commands use the same database and directories) and attaches the structured DB log handler."""
+    get_settings()
+    configure_logging(logging.DEBUG if verbose else logging.INFO, roots=LOGGER_ROOTS)
 
 
 def build_router(batch_size: int = 1) -> LLMRouter:
-    """Construct the router, running the context-budget sizing step first (see `llm/context_budget.py`):
-    local Ollama deployments get a single, precomputed `num_ctx` baked into their config so it never changes
-    across a run - computed here, once, rather than guessed in a YAML comment or recomputed per call.
+    """Construct the router with the ledger in the main database and analytics in logs.db, running the
+    context-budget sizing step first (see `llmrouter_free.context_budget`): local Ollama deployments get a
+    single, precomputed `num_ctx` baked into their config so it never changes across a run.
 
-    `batch_size` is `bg annotate --batch-size` (default 1 for every other command, which is today's
-    non-batched sizing): a batched `extract_facts`/`extract_claims` call bundles that many chunks' text and
-    output budget into one request, so both `num_ctx` and the per-attempt request timeout need to scale
-    with it - a fixed single-chunk timeout/context budget silently starves a 5-chunk local Ollama call
-    (confirmed live: a 150s single-chunk timeout was too short once the prompt+output grew 5x for a
-    batch-of-5 call that fell over to the local fallback; cloud's own context/output limits are large
-    enough - 262k tokens for openrouter-nemotron-super - that only the local path actually needed this).
+    `batch_size` is `bg annotate --batch-size` (default 1 for every other command): a batched
+    `extract_facts`/`extract_claims` call bundles that many chunks' text and output budget into one request,
+    so both `num_ctx` and the per-attempt request timeout scale with it - a fixed single-chunk timeout/context
+    silently starves a 5-chunk local Ollama call (confirmed live: 150 s was too short for a batch-of-5 call
+    that fell over to the local fallback; cloud context/output limits are large enough that only the local path
+    needed this).
     """
-    from batterygemma.llm.context_budget import apply_global_num_ctx, recommend_num_ctx
-    from batterygemma.parse.chunk import load_token_counter
+    from corpusforge.logs import get_log_engine
+    from corpusforge.parse.chunk import load_token_counter
+    from llmrouter_free import build_router as build_llm_router
+
+    from batterygemma.llm.context_budget import task_budgets
 
     settings = get_settings()
-    config = load_config("llm_routes")
-    chunk_max_tokens = load_config("generation")["chunking"]["max_tokens"]
-    report = recommend_num_ctx(chunk_max_tokens=chunk_max_tokens, count_tokens=load_token_counter(),
-                                batch_size=batch_size)
-    config = apply_global_num_ctx(config, report["global_num_ctx"])
-    config = {**config, "request_timeout_seconds": config.get("request_timeout_seconds", 150) * batch_size}
-    return LLMRouter(config, allow_paid=settings.allow_paid, max_usd_per_day=settings.max_usd_per_day)
+    return build_llm_router(
+        load_config("llm_routes"), engine=get_engine(), metrics_engine=get_log_engine(),
+        allow_paid=settings.allow_paid, max_usd_per_day=settings.max_usd_per_day,
+        tasks=task_budgets(), chunk_max_tokens=load_config("generation")["chunking"]["max_tokens"],
+        count_tokens=load_token_counter(), batch_size=batch_size,
+    )
 
 
 @app.command()
@@ -127,28 +140,54 @@ def init(
     console.print("\n[green]init complete[/green] - edit .env with your provider API keys, then `bg discover --help` to start.")
 
 
+
 @db_app.command("init")
 def db_init() -> None:
-    """Apply database migrations up to the latest revision (idempotent)."""
+    """Apply database migrations (corpusforge, batterygemma and the router ledger) up to the latest revision."""
     migrate()
     console.print(f"Database ready: {get_settings().database_url}")
+
+
+@db_app.command("adopt-split")
+def db_adopt_split(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
+) -> None:
+    """One-time: adopt a database created before batterygemma was split into three packages.
+
+    Backs the database up, verifies every expected table/column is already there, then records the new
+    per-package migration baselines and removes the old single `alembic_version` table. No table is altered
+    and no row is touched.
+    """
+    from batterygemma.db.adopt import AdoptError, adopt_split
+
+    settings = get_settings()
+    if not _confirm(f"Adopt {settings.database_url} into the split schema layout (a backup is made first)?", yes):
+        raise typer.Exit(1)
+    try:
+        report = adopt_split(settings.database_url)
+    except AdoptError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    for line in report.lines():
+        console.print(line)
 
 
 @app.command()
 def stats() -> None:
     """Row counts per table and document breakdowns by status, source and license."""
-    tables = [m.Document, m.File, m.Chunk, m.Material, m.Fact, m.Comparison, m.ClaimPair, m.QA, m.Ideation,
-              m.Negative, m.DPOPair, m.LLMCall, m.GenTask]
+    tables = [cf.Document, cf.File, cf.Chunk, m.Material, m.Fact, m.Comparison, m.ClaimPair, m.QA, m.Ideation,
+              m.Negative, m.DPOPair, LLMCall, cf.GenTask]
     with get_session() as s:
         counts = Table("table", "rows")
         for model in tables:
             counts.add_row(model.__tablename__, str(s.scalar(select(func.count()).select_from(model))))
         console.print(counts)
-        for column in (m.Document.status, m.Document.source, m.Document.license):
+        for column in (cf.Document.status, cf.Document.source, cf.Document.license):
             breakdown = Table(f"documents.{column.key}", "rows")
             for value, n in s.execute(select(column, func.count()).group_by(column).order_by(func.count().desc())):
                 breakdown.add_row(str(value), str(n))
             console.print(breakdown)
+
 
 
 @llm_app.command("status")
@@ -186,437 +225,25 @@ def llm_context_budget(
         "batchable extract_facts/extract_claims tasks (every other task is always 1 chunk/item per call)."
     ),
 ) -> None:
-    """Show the context-window sizing computed for local Ollama deployments (see llm/context_budget.py).
+    """Show the context-window sizing computed for local Ollama deployments (see llmrouter_free.context_budget).
 
     Also useful for cloud deployments even though they manage their own context automatically: the same
     per-task worst-case numbers are what you'd check a cloud model's documented context limit against.
     """
-    from batterygemma.llm.context_budget import recommend_num_ctx
-    from batterygemma.parse.chunk import load_token_counter
+    from corpusforge.parse.chunk import load_token_counter
+
+    from batterygemma.llm.context_budget import recommend
 
     chunk_max_tokens = load_config("generation")["chunking"]["max_tokens"]
-    report = recommend_num_ctx(chunk_max_tokens=chunk_max_tokens, count_tokens=load_token_counter(),
-                                batch_size=batch_size)
+    report = recommend(chunk_max_tokens=chunk_max_tokens, count_tokens=load_token_counter(), batch_size=batch_size)
     console.print(f"chunk_max_tokens (configs/generation.yaml): {report['chunk_max_tokens']}, batch_size: {batch_size}")
     table = Table("task", "template overhead (tokens)", "output budget", "recommended num_ctx")
-    from batterygemma.llm.context_budget import TASK_OUTPUT_TOKENS
-
     for task, overhead in report["overheads"].items():
-        table.add_row(task, str(overhead), str(TASK_OUTPUT_TOKENS[task]), str(report["per_task_num_ctx"][task]))
+        table.add_row(task, str(overhead), str(report["output_tokens"][task]), str(report["per_task_num_ctx"][task]))
     console.print(table)
     console.print(f"[bold]global num_ctx applied to every local deployment: {report['global_num_ctx']}[/bold]")
 
 
-@app.command()
-def discover(
-    source: str = typer.Option("all", help="openalex | chemrxiv | arxiv | all"),
-    limit: int = typer.Option(500, help="Maximum records per source"),
-    from_date: str = typer.Option("2020-01-01", help="arXiv OAI-PMH harvest start date (YYYY-MM-DD)"),
-    batch_size: int = typer.Option(200, help="Records per database commit (progress survives interruption)"),
-    fields: str = typer.Option(
-        "default", "--fields", help="Fields to request from sources that support field selection "
-        "(openalex, chemrxiv): 'default' for the curated minimal set, 'all' for the full unrestricted "
-        "record (kept on the stored document's raw_metadata), or a comma-separated custom list. "
-        "No effect on arxiv - its OAI-PMH feed has no field-selection concept, every record is fixed."
-    ),
-) -> None:
-    """Discover candidate papers and store them with cross-source deduplication."""
-    from collections import Counter
-    from itertools import islice
-
-    from batterygemma.sources.arxiv import ArxivOaiSource
-    from batterygemma.sources.base import BlockedByBotProtection, PoliteClient
-    from batterygemma.sources.crossref import DEFAULT_FIELDS as CHEMRXIV_DEFAULT_FIELDS
-    from batterygemma.sources.crossref import CrossrefChemRxivSource
-    from batterygemma.sources.openalex import DEFAULT_FIELDS as OPENALEX_DEFAULT_FIELDS
-    from batterygemma.sources.openalex import OpenAlexSource
-    from batterygemma.sources.store import upsert_records
-
-    if fields == "default":
-        custom_fields: list[str] | None = None
-    elif fields == "all":
-        custom_fields = []  # distinguished from "default" below via `use_default`
-    else:
-        custom_fields = [f.strip() for f in fields.split(",") if f.strip()]
-    use_default = fields == "default"
-
-    def resolve_fields(default: list[str]) -> list[str] | None:
-        if use_default:
-            return default
-        return custom_fields or None  # "all" (empty list) or a real custom list both fall through correctly
-
-    migrate()
-    email = get_settings().contact_email
-    cfg = load_config("sources")
-    source_cfg = cfg["sources"]
-    builders = {
-        "openalex": lambda: (
-            OpenAlexSource(PoliteClient(contact_email=email, min_interval=0.2), contact_email=email,
-                          fields=resolve_fields(OPENALEX_DEFAULT_FIELDS)),
-            source_cfg["openalex"]["terms"],
-        ),
-        "chemrxiv": lambda: (
-            CrossrefChemRxivSource(PoliteClient(contact_email=email, min_interval=0.5), contact_email=email,
-                                   fields=resolve_fields(CHEMRXIV_DEFAULT_FIELDS)),
-            source_cfg["chemrxiv"]["terms"],
-        ),
-        "arxiv": lambda: (
-            ArxivOaiSource(
-                PoliteClient(contact_email=email, min_interval=3.0),  # arXiv asks for >= 3 s between requests
-                sets=source_cfg["arxiv"]["oai_sets"], categories=source_cfg["arxiv"]["categories"],
-                from_date=from_date,
-            ),
-            cfg["scope"]["must"][0],
-        ),
-    }
-    names = list(builders) if source == "all" else [source]
-    if unknown := set(names) - builders.keys():
-        raise typer.BadParameter(f"Unknown source(s): {sorted(unknown)}")
-
-    for name in names:
-        if not source_cfg.get(name, {}).get("enabled", False):
-            console.print(f"{name}: disabled in sources.yaml, skipped")
-            continue
-        adapter, terms = builders[name]()
-        totals: Counter[str] = Counter()
-        records = adapter.discover(terms, limit)
-        try:
-            while batch := list(islice(records, batch_size)):
-                with get_session() as s:
-                    totals += upsert_records(s, batch, allow=cfg["license_allow"], flag=cfg["license_flag"])
-                console.print(f"  {name}: {sum(totals.values())} records stored so far")
-        except BlockedByBotProtection as exc:
-            console.print(f"[yellow]{name}: {exc}. Stopped this source (bot protection is not bypassed).[/yellow]")
-        finally:
-            adapter.client.close()
-        console.print(f"[bold]{name}[/bold]: {dict(totals)}")
-
-
-@app.command()
-def screen(
-    rescreen: bool = typer.Option(False, help="Also re-evaluate documents already accepted or rejected"),
-) -> None:
-    """Apply the license gate and keyword relevance scoring to discovered documents."""
-    from batterygemma.screen.screening import screen_documents
-
-    migrate()
-    with get_session() as s:
-        counts = screen_documents(s, load_config("sources"), rescreen=rescreen)
-    console.print(dict(counts))
-
-
-@app.command()
-def fetch(
-    limit: int = typer.Option(50, help="Maximum accepted documents to fetch in this run"),
-) -> None:
-    """Download full text: Europe PMC XML, else the licensed PDF, else CORE, else an Unpaywall repository mirror."""
-    import os
-    from collections import Counter
-
-    from batterygemma.fetch import fetch_document
-    from batterygemma.sources.base import PoliteClient
-
-    migrate()
-    settings = get_settings()
-    cfg = load_config("sources")
-    core_api_key = os.environ.get("CORE_API_KEY", "")
-    with get_session() as s:
-        doc_ids = s.scalars(
-            select(m.Document.doc_id)
-            .where(m.Document.status == "accepted", ~m.Document.files.any())
-            .order_by(m.Document.relevance.desc())
-            .limit(limit)
-        ).all()
-    client = PoliteClient(contact_email=settings.contact_email, min_interval=1.0)
-    outcomes: Counter[str] = Counter()
-    try:
-        for doc_id in doc_ids:
-            with get_session() as s:  # one transaction per document so progress survives interruption
-                doc = s.get(m.Document, doc_id)
-                outcome = fetch_document(s, doc, client, settings.raw_dir, allow=cfg["license_allow"],
-                                         flag=cfg["license_flag"], contact_email=settings.contact_email,
-                                         core_api_key=core_api_key)
-            outcomes[outcome] += 1
-            console.print(f"  {doc_id}: {outcome}")
-            level = logging.INFO if outcome in ("xml", "pdf", "pdf_core", "pdf_unpaywall") else logging.WARNING
-            fetch_logger.log(level, "fetch %s: %s", doc_id, outcome,
-                             extra={"context": {"doc_id": doc_id, "outcome": outcome}})
-    finally:
-        client.close()
-    console.print(dict(outcomes))
-
-
-@app.command()
-def images(
-    limit: int = typer.Option(1000, help="Maximum documents to process in this run"),
-) -> None:
-    """Resolve <graphic>/<inline-graphic> hrefs in stored XML full text and download the actual figures.
-
-    Only documents fetched as JATS XML (Europe PMC route) carry resolvable figure references; images come
-    from the official PMC Open Access S3 bucket (see images.py for why). Saved under data/images/<source>/
-    <external_id>/ and linked to the article via a File(kind="image") row, same as the XML/PDF files.
-    """
-    from collections import Counter
-
-    from batterygemma.images import download_images_for_document
-    from batterygemma.sources.base import PoliteClient
-
-    from sqlalchemy.orm import aliased
-
-    migrate()
-    settings = get_settings()
-    ImageFile = aliased(m.File)
-    with get_session() as s:
-        rows = s.execute(
-            select(m.File.doc_id, m.File.path)
-            .where(m.File.kind == "xml", ~m.File.doc_id.in_(
-                select(ImageFile.doc_id).where(ImageFile.kind == "image")
-            ))
-            .limit(limit)
-        ).all()
-    client = PoliteClient(contact_email=settings.contact_email, min_interval=0.2)
-    counts: Counter[str] = Counter()
-    try:
-        for doc_id, xml_path in rows:
-            with get_session() as s:
-                doc = s.get(m.Document, doc_id)
-                new_files = download_images_for_document(s, doc, Path(xml_path), client, settings.images_dir)
-            if new_files:
-                counts["documents_with_images"] += 1
-                counts["images_downloaded"] += len(new_files)
-                console.print(f"  {doc_id}: {len(new_files)} image(s) -> {new_files[0].path.rsplit('/', 1)[0]}")
-            else:
-                counts["no_images_found"] += 1
-    finally:
-        client.close()
-    console.print(dict(counts))
-    console.print(f"[bold]Images saved under {settings.images_dir}[/bold]")
-
-
-@app.command("add-local")
-def add_local(
-    paths: list[Path] = typer.Argument(..., help="Local PDF file(s) to add to the corpus"),
-    license: str = typer.Option(
-        "all-rights-reserved",
-        help="License to record. Leave the default unless you actually hold the rights to release this "
-        "file's content publicly — the default keeps it out of the open/CC-only track (the default track "
-        "for dataset export) while still being usable for your own local fine-tuning.",
-    ),
-    doc_id: str | None = typer.Option(
-        None,
-        help="Attach this single file to an EXISTING document (e.g. one from `bg fetch-failures`) instead of "
-        "adding it as a new one - preserves that document's original DOI/license/title. Only valid with "
-        "exactly one path.",
-    ),
-) -> None:
-    """Add local PDF file(s) directly into the corpus as already-fetched documents, ready for `bg parse`."""
-    from batterygemma.screen.license import ALLOWED, evaluate_license
-    from batterygemma.sources.local import add_local_pdf, attach_local_pdf
-
-    migrate()
-    settings = get_settings()
-    cfg = load_config("sources")
-
-    if doc_id is not None:
-        if len(paths) != 1:
-            console.print("[red]--doc-id only accepts a single path.[/red]")
-            raise typer.Exit(1)
-        try:
-            with get_session() as s:
-                doc = attach_local_pdf(s, paths[0], settings.raw_dir, doc_id)
-        except KeyError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-        console.print(f'{doc.doc_id}: "{doc.title}" — attached, status={doc.status} (license unchanged: {doc.license})')
-        return
-
-    for path in paths:
-        with get_session() as s:
-            doc = add_local_pdf(s, path, settings.raw_dir, license=license)
-        decision = evaluate_license(doc.license, cfg["license_allow"], cfg["license_flag"])
-        track = "open/CC-only" if decision == ALLOWED else "all-sources only, excluded from public export"
-        console.print(f'{doc.doc_id}: "{doc.title}" — license={doc.license} ({track})')
-
-
-@app.command("fetch-failures")
-def fetch_failures_cmd(
-    output: Path = typer.Option(
-        Path("data/review/fetch_failures.csv"), help="Where to write the CSV for manual review"
-    ),
-) -> None:
-    """List accepted documents `bg fetch` never got full text for, with a link and the reason, for manual retrieval.
-
-    Every automated, legitimate channel (Europe PMC XML, the licensed PDF, an Unpaywall mirror) has already
-    been tried - see the reason column. This never attempts to bypass bot protection or paywalls; it exists
-    so you can retrieve a paper by hand (library access, contacting the author, etc.) and add it back with
-    `bg add-local --doc-id <doc_id> <file>`, which reattaches it to this same document (keeping its DOI and
-    license) instead of creating a disconnected duplicate.
-    """
-    import csv
-
-    from batterygemma.fetch import best_effort_url
-
-    with get_session() as s:
-        docs = s.scalars(
-            select(m.Document)
-            .where(m.Document.status == "accepted", ~m.Document.files.any())
-            .order_by(m.Document.relevance.desc())
-        ).all()
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["doc_id", "title", "doi", "year", "source", "reason", "url"])
-        for doc in docs:
-            writer.writerow([doc.doc_id, doc.title, doc.doi or "", doc.year or "", doc.source,
-                             doc.status_reason or "not_yet_attempted", best_effort_url(doc)])
-
-    console.print(f"{len(docs)} documents need manual retrieval -> {output}")
-    for doc in docs[:20]:
-        console.print(f"  {doc.doc_id}: {doc.status_reason or 'not_yet_attempted'} — {best_effort_url(doc)}")
-    if len(docs) > 20:
-        console.print(f"  ... and {len(docs) - 20} more, see {output}")
-
-
-@app.command("pipeline-failures")
-def pipeline_failures_cmd(
-    output: Path = typer.Option(
-        Path("data/review/pipeline_failures.csv"), help="Where to write the CSV for review"
-    ),
-) -> None:
-    """List documents with at least one failed annotate/generate/judge task, across every stage.
-
-    `bg fetch-failures` covers documents that never got full text; this covers everything downstream of
-    that - a chunk that kept failing extraction, a Q&A that failed judging, etc. Most failures here are
-    transient (a rate-limited or timed-out LLM call) and will simply succeed on the next `bg annotate`/
-    `bg generate`/`bg judge` re-run (the task queue is resumable) - this command is for spotting a document
-    that fails *every* time, which usually means something about that specific chunk (garbled text, an
-    unusual structure) rather than bad luck.
-    """
-    import csv
-
-    from batterygemma.pipeline_failures import failed_documents
-
-    with get_session() as s:
-        results = failed_documents(s)
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["doc_id", "title", "failure_count", "stages", "sample_error"])
-        for r in results:
-            sample_error = r["failures"][0]["error"][:300] if r["failures"] else ""
-            writer.writerow([r["doc_id"], r["title"], r["failure_count"], ",".join(r["stages"]), sample_error])
-
-    console.print(f"{len(results)} documents have at least one failed task -> {output}")
-    for r in results[:20]:
-        console.print(f"  {r['doc_id']} ({r['failure_count']} failures, stages: {', '.join(r['stages'])}): {r['title'][:70]}")
-    if len(results) > 20:
-        console.print(f"  ... and {len(results) - 20} more, see {output}")
-
-
-@app.command("blacklist")
-def blacklist_cmd(
-    threshold: int = typer.Option(20, help="Blacklist any document with at least this many failed tasks"),
-) -> None:
-    """Blacklist documents that keep failing every time (see `bg pipeline-failures`), so future `bg annotate`/
-    `bg generate` runs stop retrying their chunks - it does not touch or delete anything already generated.
-    """
-    from batterygemma.pipeline_failures import blacklist_repeat_failures
-
-    with get_session() as s:
-        newly = blacklist_repeat_failures(s, threshold=threshold)
-
-    if not newly:
-        console.print(f"no documents reached the failure threshold ({threshold}) - nothing blacklisted")
-        return
-    console.print(f"blacklisted {len(newly)} document(s):")
-    for r in newly:
-        console.print(f"  {r['doc_id']} ({r['failure_count']} failures, stages: {', '.join(r['stages'])}): {r['title'][:70]}")
-
-
-@app.command("blacklist-list")
-def blacklist_list_cmd() -> None:
-    """Show every currently blacklisted document and why."""
-    with get_session() as s:
-        docs = s.scalars(select(m.Document).where(m.Document.blacklisted).order_by(m.Document.doc_id)).all()
-    if not docs:
-        console.print("no documents are blacklisted")
-        return
-    for doc in docs:
-        console.print(f"  {doc.doc_id}: {doc.blacklist_reason} — {doc.title[:70]}")
-
-
-@app.command("blacklist-remove")
-def blacklist_remove_cmd(doc_id: str = typer.Argument(..., help="Document id to un-blacklist")) -> None:
-    """Remove a document from the blacklist (e.g. after fixing whatever made it keep failing)."""
-    with get_session() as s:
-        doc = s.get(m.Document, doc_id)
-        if doc is None:
-            console.print(f"[red]no such document: {doc_id}[/red]")
-            raise typer.Exit(1)
-        was_blacklisted = doc.blacklisted
-        doc.blacklisted, doc.blacklist_reason = False, None
-    console.print(f"{doc_id}: removed from blacklist" if was_blacklisted else f"{doc_id}: was not blacklisted")
-
-
-@app.command()
-def parse(
-    limit: int = typer.Option(100, help="Maximum fetched documents to parse in this run"),
-    reparse: bool = typer.Option(False, help="Also re-chunk documents that were already chunked"),
-    from_existing_chunks: bool = typer.Option(
-        False, "--from-existing-chunks",
-        help="Re-chunk at the current configs/generation.yaml chunking settings using each "
-        "document's EXISTING chunks as source text, instead of re-parsing its original PDF/XML "
-        "(skips Docling entirely - use this after only `target_tokens`/`max_tokens` changed, not "
-        "after a genuine re-extraction is needed). Implies --reparse; only affects already-chunked "
-        "documents, since there's no existing chunk text to reconstruct from otherwise.",
-    ),
-) -> None:
-    """Parse fetched full text (JATS XML, else PDF via Docling) into section-aware, quality-flagged chunks."""
-    from batterygemma.parse.chunk import load_token_counter
-    from batterygemma.parse.pdf_docling import build_converter, parse_pdf
-    from batterygemma.parse.pipeline import parse_and_chunk, rechunk_from_existing_chunks
-
-    migrate()
-    chunking = load_config("generation")["chunking"]
-    count_tokens = load_token_counter()
-    statuses = ["chunked"] if from_existing_chunks else (["fetched", "chunked"] if reparse else ["fetched"])
-    with get_session() as s:
-        doc_ids = s.scalars(
-            select(m.Document.doc_id)
-            .where(m.Document.status.in_(statuses), m.Document.files.any())
-            .limit(limit)
-        ).all()
-
-    converter = None
-
-    def pdf_parser(path):  # the Docling converter loads layout models, so build it only if a PDF needs it
-        nonlocal converter
-        converter = converter or build_converter()
-        return parse_pdf(path, converter)
-
-    total = 0
-    for doc_id in doc_ids:
-        with get_session() as s:
-            doc = s.get(m.Document, doc_id)
-            if from_existing_chunks:
-                n = rechunk_from_existing_chunks(s, doc, count_tokens, chunking)
-            else:
-                n = parse_and_chunk(s, doc, count_tokens, chunking, pdf_parser=pdf_parser)
-        total += n
-        console.print(f"  {doc_id}: {n} chunks")
-    console.print(f"Parsed {len(doc_ids)} documents into {total} chunks")
-
-
-def _load_chunk_ids_filter(path: Path | None) -> set[str] | None:
-    """Chunk ids from a one-per-line file, or None if no file was given. Used to pin every pipeline stage
-    to the exact same fixed batch of chunks, instead of each stage independently diversifying/truncating
-    its own pending pool - which can otherwise pick different chunks at each stage and never converge on a
-    batch that has gone through facts, claims, qa, negatives *and* ideation."""
-    if path is None:
-        return None
-    return {line.strip() for line in path.read_text().splitlines() if line.strip()}
 
 
 @app.command()
@@ -649,192 +276,29 @@ def annotate(
         "speed up a large backlog. 1 (default) is the original fully-sequential behavior."
     ),
 ) -> None:
-    """Stage 7: extract facts/comparisons (kind=facts) or claim pairs (kind=claims) from chunks via the LLM."""
-    from collections import Counter
+    """Stage 7: extract facts/comparisons (kind=facts) or claim pairs (kind=claims) from chunks via the LLM.
 
-    from batterygemma.annotate.facts import annotate_chunks_facts
-    from batterygemma.annotate.claim_pairs import annotate_chunks_claims
+    The mechanics (batching, resumable task rows, retry of dropped chunks, back-off, concurrency, progress) are
+    `corpusforge.runner.run_backlog`; this command only picks the stage's `ChunkTaskSpec`.
+    """
+    from corpusforge.runner import run_backlog
 
-    runners = {"facts": annotate_chunks_facts, "claims": annotate_chunks_claims}
-    if kind not in runners:
-        raise typer.BadParameter(f"kind must be one of {sorted(runners)}", param_hint="kind")
-    task_type = {"facts": "extract_facts", "claims": "extract_claims"}[kind]
+    from batterygemma.annotate.claim_pairs import CLAIMS_SPEC
+    from batterygemma.annotate.facts import FACTS_SPEC
+
+    specs = {"facts": FACTS_SPEC, "claims": CLAIMS_SPEC}
+    if kind not in specs:
+        raise typer.BadParameter(f"kind must be one of {sorted(specs)}", param_hint="kind")
 
     migrate()
-    router = build_router(batch_size=batch_size)
-    engine = get_engine()
-    restrict_to = _load_chunk_ids_filter(chunks_file)
-    with get_session(engine) as s:
-        done_keys = {
-            row for row in s.scalars(
-                select(m.GenTask.key).where(m.GenTask.task_type == task_type, m.GenTask.status == "done")
-            )
-        } if not force else set()
-        chunk_ids = s.scalars(
-            select(m.Chunk.chunk_id)
-            .join(m.Document, m.Chunk.doc_id == m.Document.doc_id)
-            .where(m.Document.status == "chunked", ~m.Document.blacklisted)
-            .order_by(m.Chunk.doc_id, m.Chunk.order)
-        ).all()
-    if restrict_to is not None:
-        chunk_ids = [c for c in chunk_ids if c in restrict_to]
-    pending = _diversify_by_doc([c for c in chunk_ids if force or f"{task_type}:{c}" not in done_keys])[:limit]
-
-    import time
-    from datetime import datetime, timedelta
-
-    def _ts() -> str:
-        """Local wall-clock timestamp, for console lines that need to be readable against `date`/a
-        clock while watching the terminal live - `elapsed`/`waiting Ns` alone don't say when they happened."""
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    total_batches = (len(pending) + batch_size - 1) // batch_size
-    console.print(f"[{_ts()}] {kind}: {len(pending)} pending chunks, batch_size={batch_size} "
-                  f"({total_batches} API calls planned, before any retries)")
-
-    def render_progress(call_count: int, elapsed_s: float) -> Table:
-        table = Table(f"{kind} annotation progress", "value", title=f"[{_ts()}] after {call_count} API calls")
-        table.add_row("elapsed", f"{elapsed_s / 60:.1f} min")
-        table.add_row("api calls / min", f"{call_count / (elapsed_s / 60):.2f}" if elapsed_s > 0 else "n/a")
-        table.add_row("chunks done", str(outcomes["done"]))
-        table.add_row("chunks skipped", str(outcomes["skipped"]))
-        table.add_row("chunks failed", str(outcomes["failed"]))
-        table.add_row("chunks remaining", str(len(pending) - sum(outcomes.values())))
-        return table
-
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
-    from concurrent.futures import wait as futures_wait
-
-    outcomes: Counter[str] = Counter()
-    call_count = 0
-    consecutive_full_failures = 0
-    started = time.monotonic()
-    stopped = False
-
-    def handle_batch_result(batch: list[str], batch_outcomes: dict[str, str]) -> None:
-        """Process one completed batch's outcome. Mutates the enclosing `outcomes`/`call_count`/
-        `consecutive_full_failures` - only ever called from the main thread (as futures complete via
-        `futures_wait`), never from a worker thread, so it needs no lock of its own."""
-        nonlocal call_count, consecutive_full_failures, stopped
-        call_count += 1
-        # Every chunk in the batch failed: almost certainly every deployment on the route is down/exhausted
-        # right now (rather than a per-chunk issue), so retrying the exact same batch immediately would just
-        # burn another round of the same failures - pause first, per the requested backoff behavior. A GenTask
-        # marked "failed" (not "done") is still picked up as pending on the next call, batch or standalone -
-        # this is the same resumability that already lets a killed/interrupted run be re-run from scratch
-        # without redoing anything already "done".
-        batch_all_failed = bool(batch_outcomes) and all(v == "failed" for v in batch_outcomes.values())
-        if batch_all_failed:
-            consecutive_full_failures += 1
-            annotate_logger.warning(
-                f"{kind} batch fully failed ({consecutive_full_failures}/{max_consecutive_failures} "
-                f"consecutive) - every deployment on route 'extract' appears exhausted; "
-                f"waiting {retry_wait_seconds}s before retrying the same batch",
-                extra={"context": {"batch": batch, "consecutive_full_failures": consecutive_full_failures}},
-            )
-            resume_at = (datetime.now() + timedelta(seconds=retry_wait_seconds)).strftime("%Y-%m-%d %H:%M:%S")
-            console.print(f"[yellow][{_ts()}] all deployments exhausted (failure {consecutive_full_failures}/"
-                          f"{max_consecutive_failures}) - waiting {retry_wait_seconds}s, retrying at "
-                          f"{resume_at}[/yellow]")
-            if consecutive_full_failures >= max_consecutive_failures:
-                console.print(render_progress(call_count, time.monotonic() - started))
-                console.print(f"[red][{_ts()}] {max_consecutive_failures} consecutive fully-failed batches - "
-                              f"stopping. Nothing already marked done was lost; re-run this exact command "
-                              f"later to resume from where it stopped.[/red]")
-                stopped = True
-                return
-            work.append({"batch": batch, "not_before": time.monotonic() + retry_wait_seconds})
-            return
-        consecutive_full_failures = 0
-        for chunk_id in batch:
-            outcome = batch_outcomes.get(chunk_id, "failed")
-            outcomes[outcome] += 1
-        annotate_logger.info(
-            f"{kind} batch {call_count}/{total_batches}: {dict(Counter(batch_outcomes.values()))}",
-            extra={"context": {"batch": batch, "outcomes": batch_outcomes}},
-        )
-        if call_count % report_every == 0:
-            console.print(render_progress(call_count, time.monotonic() - started))
-
-    # Each work item is one batch plus the earliest time it may be (re)submitted - a fresh batch is always
-    # ready (0.0); a fully-failed batch gets pushed back with `not_before` set `retry_wait_seconds` out.
-    work: list[dict[str, Any]] = [
-        {"batch": pending[i:i + batch_size], "not_before": 0.0} for i in range(0, len(pending), batch_size)
-    ]
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        in_flight: dict[Any, list[str]] = {}
-        while (work or in_flight) and not stopped:
-            now = time.monotonic()
-            while work and len(in_flight) < concurrency:
-                ready_index = next((i for i, w in enumerate(work) if w["not_before"] <= now), None)
-                if ready_index is None:
-                    break
-                item = work.pop(ready_index)
-                future = pool.submit(runners[kind], engine, router, item["batch"], force=force)
-                in_flight[future] = item["batch"]
-            if not in_flight:
-                # Nothing submittable and nothing running: every remaining item is still waiting out a
-                # retry backoff - sleep until the earliest one is ready rather than busy-polling.
-                time.sleep(max(0.1, min(w["not_before"] for w in work) - now))
-                continue
-            done, _ = futures_wait(in_flight.keys(), timeout=5, return_when=FIRST_COMPLETED)
-            for future in done:
-                batch = in_flight.pop(future)
-                handle_batch_result(batch, future.result())
-                if stopped:
-                    break
-        # `stopped=True` only stops submitting NEW work - any batches already in flight when we stopped are
-        # left to finish naturally as the `with` block exits (their GenTask rows are written by the worker
-        # itself regardless of whether we're still here to read the future's result), rather than cancelled
-        # mid-call and leaving a chunk's task row in a half-attempted state.
-    console.print(render_progress(call_count, time.monotonic() - started))
-    if stopped:
+    result = run_backlog(
+        get_engine(), build_router(batch_size=batch_size), specs[kind], limit=limit, force=force,
+        batch_size=batch_size, restrict_to=load_chunk_ids_filter(chunks_file), concurrency=concurrency,
+        report_every=report_every, retry_wait_seconds=retry_wait_seconds,
+        max_consecutive_failures=max_consecutive_failures, label=kind, console=console,
+    )
+    if result.stopped:
         raise typer.Exit(1)
-    console.print(dict(outcomes))
-
-
-def _diversify_by_doc(chunk_ids: list[str]) -> list[str]:
-    """Round-robin `chunk_ids` (in "<doc_id>#..." form) across their documents, preserving each document's
-    own chunk order. Without this, a query ordered by (doc_id, order) and then truncated to `limit` lets one
-    large document (e.g. a long local PDF) consume an entire run's whole budget by itself - confirmed live
-    2026-09-16: a single 706-chunk local textbook ate all 2000 slots of an `annotate facts` run before any
-    of the ~500 other documents got a single chunk processed."""
-    from collections import defaultdict, deque
-
-    by_doc: dict[str, deque[str]] = defaultdict(deque)
-    doc_order: list[str] = []
-    for chunk_id in chunk_ids:
-        doc_id = chunk_id.split("#", 1)[0]
-        if doc_id not in by_doc:
-            doc_order.append(doc_id)
-        by_doc[doc_id].append(chunk_id)
-
-    result: list[str] = []
-    while doc_order:
-        for doc_id in list(doc_order):
-            result.append(by_doc[doc_id].popleft())
-            if not by_doc[doc_id]:
-                doc_order.remove(doc_id)
-    return result
-
-
-def _pending_chunk_ids(engine, task_type: str, limit: int, force: bool, restrict_to: set[str] | None = None) -> list[str]:
-    with get_session(engine) as s:
-        done_keys = set() if force else {
-            row for row in s.scalars(
-                select(m.GenTask.key).where(m.GenTask.task_type == task_type, m.GenTask.status == "done")
-            )
-        }
-        chunk_ids = s.scalars(
-            select(m.Chunk.chunk_id)
-            .join(m.Document, m.Chunk.doc_id == m.Document.doc_id)
-            .where(m.Document.status == "chunked", ~m.Document.blacklisted)
-            .order_by(m.Chunk.doc_id, m.Chunk.order)
-        ).all()
-    if restrict_to is not None:
-        chunk_ids = [c for c in chunk_ids if c in restrict_to]
-    pending = [c for c in chunk_ids if force or f"{task_type}:{c}" not in done_keys]
-    return _diversify_by_doc(pending)[:limit]
 
 
 @app.command()
@@ -861,17 +325,17 @@ def generate(
     migrate()
     router = build_router()
     engine = get_engine()
-    restrict_to = _load_chunk_ids_filter(chunks_file)
+    restrict_to = load_chunk_ids_filter(chunks_file)
     outcomes: Counter[str] = Counter()
 
     if kind == "qa":
-        for chunk_id in _pending_chunk_ids(engine, "generate_qa", limit, force, restrict_to):
+        for chunk_id in pending_chunk_ids(engine, "generate_qa", limit, force, restrict_to):
             outcome = annotate_chunk_qa(engine, router, chunk_id, force=force)
             outcomes[outcome] += 1
             console.print(f"  {chunk_id}: {outcome}")
 
     elif kind == "ideation":
-        for chunk_id in _pending_chunk_ids(engine, "generate_ideation", limit, force, restrict_to):
+        for chunk_id in pending_chunk_ids(engine, "generate_ideation", limit, force, restrict_to):
             outcome = annotate_chunk_ideation(engine, router, chunk_id, force=force)
             outcomes[outcome] += 1
             console.print(f"  {chunk_id}: {outcome}")
@@ -879,7 +343,7 @@ def generate(
     elif kind == "negatives":
         with get_session(engine) as s:
             doc_ids = s.scalars(
-                select(m.Document.doc_id).where(m.Document.status == "chunked", ~m.Document.blacklisted)
+                select(cf.Document.doc_id).where(cf.Document.status == "chunked", ~cf.Document.blacklisted)
             ).all()
         if restrict_to is not None:
             doc_ids = [d for d in doc_ids if any(c.startswith(f"{d}#") for c in restrict_to)]
@@ -887,7 +351,7 @@ def generate(
             with get_session(engine) as s:
                 derived = derive_contradiction_negatives(s, doc_id)
             outcomes["contradiction_derived"] += len(derived)
-        for chunk_id in _pending_chunk_ids(engine, "generate_false_premise", limit, force, restrict_to):
+        for chunk_id in pending_chunk_ids(engine, "generate_false_premise", limit, force, restrict_to):
             outcome = annotate_chunk_false_premise(engine, router, chunk_id, force=force)
             outcomes[outcome] += 1
             console.print(f"  {chunk_id}: {outcome}")
@@ -896,7 +360,7 @@ def generate(
         with get_session(engine) as s:
             done_keys = set() if force else {
                 row for row in s.scalars(
-                    select(m.GenTask.key).where(m.GenTask.task_type == "generate_dpo", m.GenTask.status == "done")
+                    select(cf.GenTask.key).where(cf.GenTask.task_type == "generate_dpo", cf.GenTask.status == "done")
                 )
             }
             qa_ids = s.scalars(
@@ -937,7 +401,7 @@ def judge(
     with get_session(engine) as s:
         done_keys = set() if force else {
             row for row in s.scalars(
-                select(m.GenTask.key).where(m.GenTask.task_type == task_type, m.GenTask.status == "done")
+                select(cf.GenTask.key).where(cf.GenTask.task_type == task_type, cf.GenTask.status == "done")
             )
         }
         row_ids = s.scalars(
@@ -983,12 +447,15 @@ def export(
     ),
 ) -> None:
     """Stage 9: assign train/eval splits, dedupe, then export CPT/SFT/DPO JSONL for `bg train`."""
-    from batterygemma.export.licensing import (
-        LICENSE_STATUS_FILENAME, classify_export, write_license_status,
+    from corpusforge.export.licensing import (
+        LICENSE_STATUS_FILENAME,
+        classify_export,
+        write_license_status,
     )
+    from corpusforge.verify.dedupe import mark_duplicates
+    from corpusforge.verify.split import assign_document_splits
+
     from batterygemma.export.unsloth_jsonl import export_all
-    from batterygemma.verify.dedupe import mark_duplicates
-    from batterygemma.verify.split import assign_document_splits
 
     migrate()
     settings = get_settings()
@@ -1027,7 +494,7 @@ def export(
         "safely redistributable[/red] (missing/unclear license, or a license outside "
         f"{license_cfg['license_allow']} / flagged {license_cfg['license_flag']}):"
     )
-    for key, entry in list(status["restricted_sources"].items())[:8]:
+    for entry in list(status["restricted_sources"].values())[:8]:
         console.print(f"  [{entry['status']}] {entry['doc_id']} ({entry['license']}): {entry['title'][:70]}")
     if len(status["restricted_sources"]) > 8:
         console.print(f"  ... and {len(status['restricted_sources']) - 8} more")
@@ -1044,7 +511,7 @@ def export(
 
     with get_session() as s:
         for doc_id in status["restricted_doc_ids"]:
-            doc = s.get(m.Document, doc_id)
+            doc = s.get(cf.Document, doc_id)
             if doc:
                 doc.blacklisted, doc.blacklist_reason = True, "not safely redistributable: license gate failed"
 
@@ -1111,9 +578,12 @@ def _check_license_before_training(dataset: Path, output: Path, stage: str, conf
     starts, so the run folder never depends on the shared configs/data/export trees afterward.
     Returns (local dataset copy to actually train on, whether the resulting adapter will be
     shareable)."""
-    from batterygemma.export.licensing import (
-        LICENSE_STATUS_FILENAME, restricted_doc_ids_for_file, restricted_row_indices_for_file,
-        write_filtered_jsonl, write_license_status,
+    from corpusforge.export.licensing import (
+        LICENSE_STATUS_FILENAME,
+        restricted_doc_ids_for_file,
+        restricted_row_indices_for_file,
+        write_filtered_jsonl,
+        write_license_status,
     )
 
     license_cfg = load_config("sources")
@@ -1152,7 +622,7 @@ def _check_license_before_training(dataset: Path, output: Path, stage: str, conf
 
     with get_session() as s:
         for doc_id in restricted_doc_ids:
-            doc = s.get(m.Document, doc_id)
+            doc = s.get(cf.Document, doc_id)
             if doc:
                 doc.blacklisted, doc.blacklist_reason = True, "not safely redistributable: license gate failed"
 
@@ -1246,8 +716,10 @@ def _retrain_clean(adapter_dir: Path, status: dict, yes: bool = False) -> Path:
     """Blacklist a non-shareable adapter's restricted source documents, filter them out of its
     training dataset, and retrain the same stage from that clean copy. Returns the new adapter
     dir (`<adapter_dir>-open`) to use in place of the original."""
-    from batterygemma.export.licensing import (
-        restricted_doc_ids_for_file, restricted_row_indices_for_file, write_filtered_jsonl,
+    from corpusforge.export.licensing import (
+        restricted_doc_ids_for_file,
+        restricted_row_indices_for_file,
+        write_filtered_jsonl,
     )
 
     provenance = status.get("training_provenance")
@@ -1263,7 +735,7 @@ def _retrain_clean(adapter_dir: Path, status: dict, yes: bool = False) -> Path:
     )
     with get_session() as s:
         for doc_id in restricted_doc_ids:
-            doc = s.get(m.Document, doc_id)
+            doc = s.get(cf.Document, doc_id)
             if doc:
                 doc.blacklisted, doc.blacklist_reason = True, "not safely redistributable: license gate failed"
     drop_indices = restricted_row_indices_for_file(dataset.parent, dataset.name, restricted_doc_ids)
@@ -1291,7 +763,8 @@ def train_export_gguf_cmd(
     material never blocks producing one, only a warning is shown. The hard gate is at
     `bg train push-to-hub`, which refuses to actually publish a GGUF built from restricted data.
     """
-    from batterygemma.export.licensing import LICENSE_STATUS_FILENAME, read_license_status, write_license_status
+    from corpusforge.export.licensing import LICENSE_STATUS_FILENAME, read_license_status, write_license_status
+
     from batterygemma.train.environment import UnslothInstallError, ensure_unsloth
     from batterygemma.train.sft import export_gguf_from_adapter
 
@@ -1339,8 +812,10 @@ def train_push_to_hub_cmd(
     non-open-licensed material. When blocked, offers to retrain on a clean, filtered dataset and
     publish that instead.
     """
-    from batterygemma.export.hf_release import attribution_summary, build_model_card, push_gguf_to_hub
-    from batterygemma.export.licensing import LICENSE_STATUS_FILENAME, read_license_status, write_license_status
+    from corpusforge.export.hf_release import attribution_summary, build_model_card, push_gguf_to_hub
+    from corpusforge.export.licensing import LICENSE_STATUS_FILENAME, read_license_status, write_license_status
+
+    from batterygemma.export.model_card import BATTERY_MODEL_CARD
     from batterygemma.train.environment import UnslothInstallError, ensure_unsloth
     from batterygemma.train.sft import export_gguf_from_adapter
 
@@ -1385,7 +860,7 @@ def train_push_to_hub_cmd(
     model_card = build_model_card(
         repo_name=repo_id.split("/")[-1], base_model=load_config(status["training_provenance"]["config"])["model_name"],
         license_id="cc-by-4.0", quantization=quantization,
-        training_provenance=status["training_provenance"], attribution=attribution,
+        training_provenance=status["training_provenance"], attribution=attribution, card=BATTERY_MODEL_CARD,
     )
     console.print(f"About to publish to [bold]https://huggingface.co/{repo_id}[/bold] "
                   f"({'private' if private else 'public'}) - {len(attribution)} attributed source(s), "
@@ -1436,9 +911,9 @@ def eval_run_cmd(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
+    import mlx_lm
     from unsloth import FastModel
     from unsloth.chat_templates import get_chat_template
-    import mlx_lm
 
     mlx_model, tokenizer = FastModel.from_pretrained(model_name=model, max_seq_length=max_seq_length, text_only=True)
     tokenizer = get_chat_template(tokenizer, chat_template="gemma-4")
@@ -1464,84 +939,9 @@ def eval_run_cmd(
     console.print(f"results written to {output}")
 
 
-def _log_table(entries) -> Table:  # noqa: ANN001 - list[LogEntry], kept loose to avoid importing the type here
-    table = Table("id", "ts", "level", "component", "message", "context")
-    for e in entries:
-        table.add_row(str(e.id), e.ts.strftime("%Y-%m-%d %H:%M:%S"), e.level, e.component,
-                      e.message[:120], str(e.context) if e.context else "")
-    return table
 
 
-@logs_app.command("tail")
-def logs_tail(
-    n: int = typer.Option(50, "-n", help="Number of most recent entries to show"),
-    level: str | None = typer.Option(None, help="Filter by level, e.g. WARNING"),
-    component: str | None = typer.Option(None, help="Filter by logger name substring, e.g. fetch or router"),
-    follow: bool = typer.Option(False, "-f", "--follow", help="Keep polling for new entries (like tail -f)"),
-) -> None:
-    """Show the most recent log entries, oldest first."""
-    import time as _time
-
-    from batterygemma.logs import get_log_session, query_logs
-
-    with get_log_session() as s:
-        entries = list(reversed(query_logs(s, level=level, component=component, limit=n)))
-    console.print(_log_table(entries))
-    if not follow:
-        return
-    last_id = entries[-1].id if entries else 0
-    try:
-        while True:
-            _time.sleep(1.0)
-            with get_log_session() as s:
-                new = query_logs(s, level=level, component=component, after_id=last_id, limit=1000)
-            if new:
-                console.print(_log_table(new))
-                last_id = new[-1].id
-    except KeyboardInterrupt:
-        pass
-
-
-@logs_app.command("query")
-def logs_query(
-    level: str | None = typer.Option(None, help="Filter by level, e.g. ERROR"),
-    component: str | None = typer.Option(None, help="Filter by logger name substring"),
-    contains: str | None = typer.Option(None, help="Filter by a substring in the message"),
-    limit: int = typer.Option(100, help="Maximum rows to return"),
-) -> None:
-    """Search the log, most recent first."""
-    from batterygemma.logs import get_log_session, query_logs
-
-    with get_log_session() as s:
-        entries = query_logs(s, level=level, component=component, contains=contains, limit=limit)
-    console.print(_log_table(entries))
-    console.print(f"{len(entries)} entries")
-
-
-@logs_app.command("stats")
-def logs_stats() -> None:
-    """Row counts by level and by component."""
-    from batterygemma.logs import get_log_session, log_stats
-
-    with get_log_session() as s:
-        stats = log_stats(s)
-    console.print("by level:", stats["by_level"])
-    console.print("by component:", stats["by_component"])
-
-
-@logs_app.command("clear")
-def logs_clear(
-    older_than_days: int | None = typer.Option(None, help="Only delete entries older than this many days"),
-) -> None:
-    """Delete log entries (all of them, unless --older-than-days is given)."""
-    from datetime import datetime, timedelta, timezone
-
-    from batterygemma.logs import clear_logs, get_log_session
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days) if older_than_days else None
-    with get_log_session() as s:
-        n = clear_logs(s, older_than=cutoff)
-    console.print(f"deleted {n} log entries")
+register_pipeline_commands(app)
 
 
 if __name__ == "__main__":

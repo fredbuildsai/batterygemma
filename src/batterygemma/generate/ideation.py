@@ -10,14 +10,15 @@ what's stated, not restate it, so word-overlap grounding doesn't apply. Quality 
 stage 9's judge scoring (`verify.judge`), matching the plan's "2 judges + agreement" design for ideation.
 """
 
+from corpusforge.annotate.tasks import get_or_create_task, mark_done, mark_failed
+from corpusforge.models import Chunk, GenTask
+from llmrouter_free import AllDeploymentsExhausted, LLMRouter, json_schema_response_format, json_validator
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import Chunk, Comparison, Fact, GenTask, Ideation
+from batterygemma.db.models import Comparison, Fact, Ideation
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import IdeationOut, json_schema_response_format, json_validator
+from batterygemma.llm.schemas import IdeationOut
 
 MIN_FACTS_FOR_IDEATION = 2
 

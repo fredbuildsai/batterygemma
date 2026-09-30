@@ -2,12 +2,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from corpusforge.runner import call_and_persist
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.annotate.claim_pairs import annotate_chunks_claims, extract_claim_pairs
-from batterygemma.db.models import Chunk, ClaimPair, Document, GenTask
+from batterygemma.annotate.claim_pairs import CLAIMS_SPEC, annotate_chunks_claims
+from batterygemma.db.models import ClaimPair
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import LLMRouter
 
 CHUNK_ID = "doc:2#s00-c00"
 CHUNK_TEXT = (
@@ -21,6 +23,16 @@ CONFIG = {
     "deployments": [{"name": "gen", "model": "p/gen", "api_key_env": "KEY_A", "family": "fam1"}],
     "routes": {"extract": ["gen"]},
 }
+
+
+def extract_claim_pairs(session, router, chunks, *, use_cache=True):
+    """One LLM call + persistence (no task bookkeeping) -> {chunk_id: [ClaimPair rows]}."""
+    payloads = call_and_persist(session, router, CLAIMS_SPEC, chunks, use_cache=use_cache, console=None)
+    session.flush()
+    return {
+        chunk_id: list(session.scalars(select(ClaimPair).where(ClaimPair.id.like(f"{chunk_id}#pair%")).order_by(ClaimPair.id)))
+        for chunk_id in payloads
+    }
 
 
 @pytest.fixture(autouse=True)

@@ -2,12 +2,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from corpusforge.runner import call_and_persist
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.annotate.facts import annotate_chunks_facts, extract_facts_and_comparisons
-from batterygemma.db.models import Chunk, Comparison, Document, Fact, GenTask
+from batterygemma.annotate.facts import FACTS_SPEC, annotate_chunks_facts
+from batterygemma.db.models import Comparison, Fact
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import LLMRouter
 
 CHUNK_ID = "doc:1#s00-c00"
 CHUNK_TEXT = (
@@ -68,6 +70,19 @@ def make_router(engine, text_by_call):
         )
 
     return LLMRouter(CONFIG, engine=engine, completion_fn=completion), calls
+
+
+def extract_facts_and_comparisons(session, router, chunks, *, use_cache=True):
+    """One LLM call + persistence (no task bookkeeping) -> {chunk_id: (fact rows, comparison rows)}."""
+    payloads = call_and_persist(session, router, FACTS_SPEC, chunks, use_cache=use_cache, console=None)
+    session.flush()
+    return {
+        chunk_id: (
+            list(session.scalars(select(Fact).where(Fact.id.like(f"{chunk_id}#fact%")).order_by(Fact.id))),
+            list(session.scalars(select(Comparison).where(Comparison.id.like(f"{chunk_id}#cmp%")).order_by(Comparison.id))),
+        )
+        for chunk_id in payloads
+    }
 
 
 def seed_chunk(engine, chunk_id=CHUNK_ID, text=CHUNK_TEXT):

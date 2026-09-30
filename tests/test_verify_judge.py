@@ -2,11 +2,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.db.models import Chunk, Document, GenTask, Ideation, QA
+from batterygemma.db.models import QA, Ideation
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import LLMRouter
 from batterygemma.verify.judge import _family_of, judge_ideation, judge_one_ideation, judge_one_qa, judge_qa
 
 QA_ID = "doc:1#s00-c00#qa0"

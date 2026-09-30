@@ -12,14 +12,15 @@ See `annotate.facts` module docstring for why the resumable wrappers manage thei
 around the LLM call (SQLite deadlock risk).
 """
 
+from corpusforge.annotate.tasks import get_or_create_task, mark_done, mark_failed
+from corpusforge.models import Document, GenTask
+from llmrouter_free import AllDeploymentsExhausted, LLMRouter, json_schema_response_format, json_validator
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from batterygemma.annotate.tasks import get_or_create_task, mark_done, mark_failed
-from batterygemma.db.models import ClaimPair, Document, GenTask, Negative
+from batterygemma.db.models import ClaimPair, Negative
 from batterygemma.db.session import get_session
-from batterygemma.llm.router import AllDeploymentsExhausted, LLMRouter
-from batterygemma.llm.schemas import FalsePremiseOut, json_schema_response_format, json_validator
+from batterygemma.llm.schemas import FalsePremiseOut
 
 FALSE_PREMISE_SYSTEM_PROMPT = (
     "You are an expert lithium-ion battery materials scientist. Write one question that contains a specific, "
@@ -115,7 +116,7 @@ def generate_false_premise(
 
 def annotate_chunk_false_premise(engine: Engine, router: LLMRouter, chunk_id: str, *, force: bool = False) -> str:
     """Resumable single-chunk false-premise generation, by chunk_id. Returns: done | skipped | failed."""
-    from batterygemma.db.models import Chunk
+    from corpusforge.models import Chunk
 
     task_key = f"generate_false_premise:{chunk_id}"
     with get_session(engine) as s:

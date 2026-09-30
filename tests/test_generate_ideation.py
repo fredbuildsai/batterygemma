@@ -2,12 +2,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from corpusforge.models import Chunk, Document, GenTask
+from llmrouter_free import LLMRouter
 from sqlalchemy import select
 
-from batterygemma.db.models import Chunk, Comparison, Document, Fact, GenTask, Ideation
+from batterygemma.db.models import Comparison, Fact, Ideation
 from batterygemma.db.session import get_session
 from batterygemma.generate.ideation import annotate_chunk_ideation, generate_ideation, has_enough_facts
-from batterygemma.llm.router import LLMRouter
 
 CHUNK_ID = "doc:1#s00-c00"
 CHUNK_TEXT = "Silicon anodes expand by 300% during lithiation, repeatedly fracturing the SEI."
