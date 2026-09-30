@@ -15,8 +15,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # `uv pip install` ignores [tool.uv.sources] (the local ../llmrouter-free and ../corpusforge overrides), so
-      # this installs both packages from their pinned GitHub tags exactly as an end user would - which also
+      # Installs both packages from their pinned GitHub tags exactly as an end user would, which also
       # verifies the documented install path on every push.
       - name: Install
         run: uv venv && uv pip install -e ".[dev,parse,dedupe]"

@@ -284,8 +284,7 @@ uv pip install -e ".[dev,parse,dedupe]"
 bg init                           # scaffolds configs/, .env, data/output dirs, and the database
 ```
 
-(`uv sync --extra dev --extra parse --extra dedupe` also works from a checkout that has the sibling repositories next to
-it: `pyproject.toml` maps both packages to `../llmrouter-free` and `../corpusforge` for development.)
+For development across all three repositories use `scripts/setup.sh --dev` (sibling checkouts, editable installs).
 
 `bg init` is safe to re-run any time — it reports what already exists rather than touching it (`--force` to
 overwrite). It also works in a completely empty directory: `configs/`, `.env`, `data/`, and a migrated

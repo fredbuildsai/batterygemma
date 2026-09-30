@@ -43,12 +43,6 @@ packages = ["src/batterygemma"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-[tool.uv.sources]
-# Local development: use the sibling checkouts instead of the GitHub tags (ignored by pip / end users;
-# scripts/setup.sh --dev clones the siblings for you).
-llmrouter-free = { path = "../llmrouter-free", editable = true }
-corpusforge = { path = "../corpusforge", editable = true }
-
 [tool.ruff]
 line-length = 120
 target-version = "py311"
