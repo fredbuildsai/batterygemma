@@ -18,7 +18,7 @@ jobs:
       # Installs both packages from their pinned GitHub tags exactly as an end user would, which also
       # verifies the documented install path on every push.
       - name: Install
-        run: uv venv && uv pip install -e ".[dev,parse,dedupe]"
+        run: uv pip install -e ".[dev,parse,dedupe]"
       - name: Lint
         run: uv run --no-sync ruff check src tests
       - name: Shellcheck the setup script
