@@ -1,0 +1,27 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Installs both packages from their pinned GitHub tags exactly as an end user would, which also
+      # verifies the documented install path on every push.
+      - name: Install
+        run: uv pip install -e ".[dev,parse,dedupe]"
+      - name: Lint
+        run: uv run --no-sync ruff check src tests
+      - name: Shellcheck the setup script
+        run: shellcheck scripts/setup.sh
+      - name: Test
+        run: uv run --no-sync pytest -q

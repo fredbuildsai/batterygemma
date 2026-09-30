@@ -1,0 +1,37 @@
+# Continued-pretraining LoRA config. Trained via Unsloth's MLX backend (Apple Silicon) - see
+# src/batterygemma/train/sft.py module docstring for what is and isn't supported on this backend.
+model_name: unsloth/gemma-4-E2B-it-UD-MLX-4bit   # Unsloth's own dynamic ("UD") 4-bit quant, pre-converted
+                                                  # to MLX - unlike plain unsloth/gemma-4-E2B-it (full
+                                                  # precision), this needs no runtime quantization pass at
+                                                  # load, which was confirmed live (2026-09-18, 3 attempts)
+                                                  # to push this 16GB M1 Air into heavy swap before training
+                                                  # could even start. unsloth/gemma-4-E2B-it-GGUF (also
+                                                  # Unsloth's own) is NOT usable here despite being 4-bit -
+                                                  # this Unsloth version's MLX backend only exports to GGUF,
+                                                  # it has no load path from GGUF for training.
+max_seq_length: 2048  # restored to 2048 on 2026-09-18: the earlier memory pressure (see model_name comment)
+                       # turned out to happen during model load/quantization, before any batch was processed,
+                       # so seq_length was never the actual lever - reducing it to 1024 made no difference.
+text_only: true  # Gemma 4 E2B is natively multimodal; this forces the plain mlx-lm text path instead of
+                 # the VLM path - set to false only when training against an `include_images` export.
+
+lora:
+  r: 16
+  lora_alpha: 16
+  lora_dropout: 0
+  finetune_language_layers: true
+  finetune_attention_modules: true
+  finetune_mlp_modules: true
+
+# Passed to unsloth.MLXTrainingConfig. Keys here mirror TRL's SFTConfig field names.
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_steps: 150  # sized 2026-09-22 against real measured throughput on this M1 Air (~41-68 tok/s from the
+                  # 30-step PoC run): 150 steps x 8 grad-accum = 1,200 of the 3,297 packed CPT rows (incl.
+                  # 245 ontology rows), estimated ~8-12h wall clock - a bounded, same-day-scale run rather
+                  # than the ~20-30h a full epoch over all 3,297 rows would take.
+  learning_rate: 0.0001
+  warmup_steps: 10
+  logging_steps: 1
+  save_steps: 0

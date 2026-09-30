@@ -1,0 +1,283 @@
+# Teacher-LLM deployments and task routes.
+# Model ids use LiteLLM's "<provider>/<model>" convention. Limits are starting points: check your
+# workspace limits in each provider's console and edit them. The router also backs off automatically on
+# 429s, so an over-estimate costs retries, not failures. A deployment whose api_key_env is unset is skipped.
+#
+#   rate_group   deployments drawing on one provider budget (e.g. a Mistral workspace) share rpm/rpd windows
+#                and rate-limit cooldowns
+#   rpm/tpm/rpd  requests per minute / tokens per minute / requests per day (null = unlimited); applied per group
+#   tier         free | paid (paid only used when BG_ALLOW_PAID=true and under the daily budget)
+#   family       model family, used to keep judge != generator family
+#   tags         capabilities: strong, fast, judge, json
+#   cost_per_mtok_in/out  USD per million tokens (paid tier budget accounting)
+#   api_base     override the provider's default endpoint
+#   extra_body   passed through verbatim to the request (e.g. reasoning/thinking controls)
+#   min_max_tokens  floor on the requested max_tokens; useful for reasoning models that spend budget thinking
+
+deployments:
+  # --- Retired from routes on 2026-09-15 after a real 5-chunk, 3-attempt, schema-validated comparison
+  # across NVIDIA DeepSeek, Mistral (small/medium/magistral), Gemini, Nemotron Super/Ultra, local
+  # gemma4:e4b and local qwen3.5:9b-mlx (see data/eval/model_comparison/20260915T155820Z.json). Winners:
+  # openrouter-nemotron-super (cloud) and ollama-gemma4-e4b (local fallback) - both survive with
+  # response_format=json_schema (not json_object) constrained decoding, correctly emit `comparisons` with
+  # the broadened extraction prompt, and finish in well under a minute per chunk. Deployment definitions
+  # below are kept (not deleted) for reference/rollback; they are simply absent from `routes:`.
+  # - NVIDIA DeepSeek: degraded/timing out on 2026-09-14/15, unreliable even before comparing content.
+  # - Mistral small/medium/magistral: free-tier workspace heavily rate-limited in practice at pipeline scale.
+  # - Gemini: confirmed persistent 429 quota exhaustion even with 5s retries and 6s call spacing.
+  # - Nemotron Ultra: not needed for generation once Super proved sufficient; kept only for `judge`.
+  # - local qwen3.5:9b-mlx: catastrophically slow (816s avg/chunk over 5 chunks, one call took 2526s).
+  - name: nvidia-deepseek
+    model: nvidia_nim/deepseek-ai/deepseek-v4-flash-0731
+    api_key_env: NVIDIA_NIM_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    tier: free
+    family: deepseek
+    rate_group: nvidia-workspace  # conservative: NVIDIA's free-tier quota may be shared across models on the key
+    rpm: 40
+    min_max_tokens: 8192  # thinking can consume most of a small budget before the answer is written
+    extra_body:
+      chat_template_kwargs: {thinking: true, reasoning_effort: low}  # high effort took ~80s even on trivial prompts
+    tags: [strong, json, judge]
+
+  # --- OpenRouter, free tier: verified live against the real extraction task (5 real chunks, schema-
+  # validated) on 2026-09-14 - deepseek-v4-flash-0731 above was timing out at the time, these were not.
+  # Both occasionally return an empty/malformed response (confirmed transient - an immediate retry on the
+  # same prompt succeeded); the router's normal invalid_output failover already covers that.
+  - name: openrouter-nemotron-super
+    model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+    api_key_env: OPENROUTER_API_KEY
+    tier: free
+    family: nemotron
+    extra_body: {reasoning: {enabled: false}}
+    # Confirmed live 2026-09-16 on the same 5 real chunks, repeated at each temperature: at the default
+    # (~1.0), Nemotron fabricated a comparison's `direction` from a sentence that states no outcome ("results
+    # were compared" -> invented "improves"/"unchanged"), and separately misattributed a fact's `material` to
+    # the wrong nearby entity (twice, on two different chunks) - neither reproduced at temperature 0.4, which
+    # also had zero failed chunks vs one at 1.0, with no loss of fact/comparison completeness.
+    temperature: 0.4
+    tags: [strong, fast, json]
+
+  - name: openrouter-nemotron-ultra
+    model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+    api_key_env: OPENROUTER_API_KEY
+    tier: free
+    family: nemotron
+    extra_body: {reasoning: {enabled: false}}
+    tags: [strong, json, judge]  # the only model tested today that actually populated `comparisons`
+
+  # --- OpenRouter, free tier: added 2026-09-21 as the `extract` route's fallback in place of local Ollama,
+  # while batched (multi-chunk) extraction calls are new and untested against the local model's real
+  # throughput/context ceiling. 32,768 token context/completion window - smaller than nemotron-super's
+  # 262,144, but comfortably covers a `bg annotate --batch-size 5` extract call (5 chunks x up to 2000
+  # tokens each + template overhead + up to 5 x 3000 output tokens is well under 32k).
+  - name: openrouter-glm-5.2
+    model: openrouter/z-ai/glm-5.2:free
+    api_key_env: OPENROUTER_API_KEY
+    tier: free
+    family: glm
+    # Both this and qwen3.8-27b below are reasoning/thinking models; without this, confirmed live
+    # (2026-09-21) on qwen3.8-27b that a batch-of-5 extract call burned 14,488 of its 15,000-token
+    # completion budget on reasoning alone (native_tokens_reasoning), leaving almost nothing for the
+    # actual JSON answer and truncating (finish_reason: length) - same fix as openrouter-nemotron-super.
+    extra_body: {reasoning: {enabled: false}}
+    tags: [strong, json]
+
+  # --- OpenRouter, free tier: added 2026-09-21 as a third `extract` fallback, alongside glm-5.2, so a
+  # transient outage/rate-limit on one free model doesn't exhaust the whole route on its own. 262,144
+  # token context/completion window, same order of magnitude as nemotron-super.
+  - name: openrouter-qwen3.8-27b
+    model: openrouter/qwen/qwen3.8-27b:free
+    api_key_env: OPENROUTER_API_KEY
+    tier: free
+    family: qwen
+    extra_body: {reasoning: {enabled: false}}  # see openrouter-glm-5.2's comment - confirmed live on this
+                                                # exact deployment: 14,488/15,000 completion tokens spent on
+                                                # reasoning, truncating the actual JSON answer.
+    tags: [strong, json]
+
+  # --- Mistral, free Experiment tier: every model shares one workspace budget ------------------------
+  - name: mistral-small
+    model: mistral/mistral-small-latest
+    api_key_env: MISTRAL_API_KEY
+    tier: free
+    family: mistral
+    rate_group: mistral-workspace
+    rpm: 20
+    tags: [fast, json]
+
+  - name: mistral-medium
+    model: mistral/mistral-medium-latest
+    api_key_env: MISTRAL_API_KEY
+    tier: free
+    family: mistral
+    rate_group: mistral-workspace
+    rpm: 20
+    tags: [strong, json]
+
+  - name: magistral-medium
+    model: mistral/magistral-medium-latest
+    api_key_env: MISTRAL_API_KEY
+    tier: free
+    family: mistral
+    rate_group: mistral-workspace
+    rpm: 20
+    tags: [strong, judge]
+
+  # Returned 403 tier_not_allowed on the Experiment tier; kept for a paid workspace, not used in routes.
+  - name: mistral-large
+    model: mistral/mistral-large-latest
+    api_key_env: MISTRAL_API_KEY
+    tier: free
+    family: mistral
+    rate_group: mistral-workspace
+    rpm: 20
+    tags: [strong, json, judge]
+
+  # --- Other providers (defined but not in routes yet; add a key and put them in a route to use) ----
+  - name: gemini-flash
+    model: gemini/gemini-flash-latest  # gemini-2.5-flash was stale; confirmed live as gemini-3.8-flash on 2026-09-14
+    api_key_env: GEMINI_API_KEY
+    tier: free
+    family: gemini
+    # Google's published free-tier RPM for Flash has been genuinely volatile (10-15 RPM across 2026 per
+    # third-party trackers, no fixed number in Google's own docs - they point at the account-specific
+    # dashboard instead). Confirmed live: 5 back-to-back calls with no spacing hit a 429 quota error after
+    # only ~5 requests. rpm:12 (one call per 5s) is a deliberately conservative cap under every reported
+    # figure; the router's existing rpm window already spaces calls to fit, no extra code needed.
+    rpm: 12
+    tags: [fast, strong, json, judge]
+
+  # nim-llama (nvidia_nim/meta/llama-3.3-70b-instruct) removed: NVIDIA retired this model on 2026-08-26
+  # (confirmed live via a 410 Gone response) - no verified working replacement on this account's NIM catalog
+  # yet (several candidates returned 404 "not enabled for this account" or their own 410s when tested).
+
+  - name: groq-llama
+    model: groq/llama-3.3-70b-versatile
+    api_key_env: GROQ_API_KEY
+    tier: free
+    family: llama
+    rpm: 30
+    rpd: 1000
+    tags: [fast, json]
+
+  # Tested live 2026-09-16/17 on the real extract_facts task (5 real chunks): 100% schema-valid, ~17s/call,
+  # but extracts less thoroughly than Nemotron and doesn't reliably fill `triple`/`formula` - not used as a
+  # generator. For a *judge* role its family ("gpt-oss") is safely independent of both nemotron and gemma4,
+  # and the judge schemas (QAJudgeOut/IdeationJudgeOut - plain ints/strings, no free-form dict fields) don't
+  # hit the `strict: true` limitation ExtractionOut does (see annotate.facts's response_format usage), so
+  # strict schema-constrained decoding should just work here unlike for extraction. Not in any route yet -
+  # add it to `judge:` below to try it (temperature untested for this task; the extraction sweep found
+  # gpt-oss-120b's completeness varies more with temperature than Nemotron's does, so re-check before
+  # trusting a specific value). Groq started returning 403 "Access denied. Please check your network
+  # settings." on every call as of 2026-09-17 21:36 - unrelated to the API key, cause not yet diagnosed.
+  - name: groq-gpt-oss-120b
+    model: groq/openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+    tier: free
+    family: gpt-oss
+    rpm: 30
+    tags: [fast, json, judge]
+
+  - name: cerebras-qwen
+    model: cerebras/qwen-3-32b
+    api_key_env: CEREBRAS_API_KEY
+    tier: free
+    family: qwen
+    rpm: 30
+    rpd: 14400
+    tags: [fast, json, judge]
+
+  - name: claude-sonnet
+    model: anthropic/claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    tier: paid
+    family: claude
+    rpm: 50
+    cost_per_mtok_in: 3.0
+    cost_per_mtok_out: 15.0
+    tags: [strong, json, judge]
+
+  # --- Local (Ollama, http://localhost:11434), no API key and no rate limit: the reliability fallback
+  # for when every free-tier cloud deployment above is rate-limited at once (confirmed happening in
+  # practice at pipeline scale - see full-run-20260914-073925.log). Listed LAST in every route so cloud
+  # is tried first (much faster per call when it isn't throttled); local only carries load cloud can't.
+  # api_key_env points at a placeholder value (Ollama needs none) purely so Deployment.enabled is true.
+  - name: ollama-gemma4-12b
+    model: ollama_chat/gemma4:12b
+    api_key_env: OLLAMA_API_KEY
+    api_base: http://localhost:11434
+    tier: free
+    family: gemma4
+    # This is a thinking model: with thinking left on it either burns the whole max_tokens budget on
+    # reasoning_content and returns empty content (confirmed at max_tokens=200), or - even with a larger
+    # budget - takes 150-180s+ per call on this machine, which starves the router's 180s per-attempt
+    # timeout (confirmed both ways with a real call). Ollama's `think: false` request field turns
+    # reasoning off outright, which fixed both: ~30-70s/call and a populated `content` field.
+    # (extra_body.options.num_ctx is computed and injected at startup by cli.build_router() - see
+    # llm/context_budget.py - not hardcoded here, so it stays correct if chunking/prompt config changes.)
+    extra_body: {think: false}
+    tags: [strong, json]
+
+  - name: ollama-gemma4-e4b
+    model: ollama_chat/gemma4:e4b
+    api_key_env: OLLAMA_API_KEY
+    api_base: http://localhost:11434
+    tier: free
+    family: gemma4  # same family as ollama-gemma4-12b - the router's exclude_families check correctly
+                    # skips this when the generator itself fell back to the local 12b model, falling
+                    # through to ollama-gemma3-4b (a genuinely different family) for that case instead.
+    extra_body: {think: false}
+    tags: [strong, json, judge]
+
+  - name: ollama-gemma3-4b
+    model: ollama_chat/gemma3:4b
+    api_key_env: OLLAMA_API_KEY
+    api_base: http://localhost:11434
+    tier: free
+    family: gemma3
+    tags: [fast, json, judge]
+
+# Hybrid: cloud tried first (fast when not rate-limited), local Ollama as the guaranteed fallback.
+# max_cloud_attempts (below) caps how many cloud attempts a single call will make before jumping straight
+# to local - LLMRouter logs that switch at WARNING (visible on console and in `bg logs`), and stops waiting
+# on cloud cooldowns once it happens, rather than burning the whole max_wait_seconds budget on cloud first.
+routes:
+  screen:    [openrouter-nemotron-super, ollama-gemma4-e4b]
+  # No local fallback for now (2026-09-21): batched (multi-chunk) extract calls are new and their real
+  # throughput/context behavior on local Ollama hasn't been characterized yet - openrouter-glm-5.2 and
+  # openrouter-qwen3.8-27b (both free, large context/completion windows) cover the fallback role instead.
+  extract:   [openrouter-nemotron-super, openrouter-glm-5.2, openrouter-qwen3.8-27b]
+  qa:        [openrouter-nemotron-super, ollama-gemma4-e4b]
+  negatives: [openrouter-nemotron-super, ollama-gemma4-e4b]
+  ideation:  [openrouter-nemotron-super, ollama-gemma4-e4b]
+  # judge must not share a family with the generator (openrouter-nemotron-super / ollama-gemma4-e4b, family
+  # nemotron/gemma4) - both groq-gpt-oss-120b ("gpt-oss" family) and ollama-gemma3-4b are genuinely
+  # different families. Switched to Groq-first on 2026-09-17: same judge schemas (QAJudgeOut/IdeationJudgeOut
+  # - plain ints/strings, no free-form dict) work cleanly with strict:false there (confirmed live), and cloud
+  # avoids running this stage entirely on local compute. ollama-gemma3-4b stays as the free, always-available
+  # fallback if Groq's rate limit or availability hiccups (it returned a transient 403 "Access denied" on
+  # 2026-09-17 21:36, cleared by 23:30 - cause not diagnosed, kept as a reason to keep the local fallback).
+  judge:     [groq-gpt-oss-120b, ollama-gemma3-4b]
+
+cooldown:
+  rate_limit_seconds: 60        # 429 per-minute limits (shared by a rate_group)
+  daily_quota_seconds: 86400    # provider says daily quota exhausted
+  error_seconds: 30             # transient 5xx / timeouts (per deployment)
+max_attempts_per_call: 10       # raised from 6 on 2026-09-21 alongside max_attempts_per_deployment=3: worst
+                                 # case is now up to 3 tries each on 3 extract deployments before exhausting.
+max_attempts_per_deployment: 3  # retry a transient error/invalid_output on the SAME deployment (each retry
+                                 # paying cooldown_error's wait) up to this many times before moving to the
+                                 # next deployment in the route - added 2026-09-21: nemotron-super is
+                                 # confirmed meaningfully more reliable than the extract route's other two
+                                 # free-tier fallbacks (glm-5.2/qwen3.8-27b get 429'd far more often), so a
+                                 # single transient nemotron error shouldn't immediately burn an attempt on a
+                                 # deployment that's statistically less likely to succeed anyway.
+max_cloud_attempts: 2           # switch to the local fallback after this many cloud attempts on one call
+request_timeout_seconds: 150    # per-HTTP-request cap. Raised from 60s on 2026-09-16: at pipeline scale, with
+                                 # `bg fetch`/`bg images` running concurrently on the same M1, local gemma4:e4b
+                                 # extraction calls were seen legitimately taking >60s (not hanging - just
+                                 # slower under real contention), causing a rising real failure rate (23% and
+                                 # climbing on `annotate facts`) that was pure timeout waste, not a stuck
+                                 # request. 150s stays well under the old problematic 180s hang case while
+                                 # covering today's measured worst case with headroom.

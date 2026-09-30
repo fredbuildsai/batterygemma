@@ -1,0 +1,33 @@
+# Labels shared by annotation, generation, balancing and evaluation.
+components: [cathode, anode, electrolyte, interphase, separator_binder, cell, other]
+
+question_types:
+  mechanism: "Why/how a phenomenon occurs at the atomic, structural or interfacial level"
+  structure_property: "How composition, structure or morphology determines a property"
+  trade_off: "Competing effects of a design choice and how to balance them"
+  characterization_interpretation: "What a measurement (XRD, XPS, EIS, dQ/dV, NMR, TEM...) shows and why"
+  synthesis_processing: "How a material or electrode is made and how processing changes the outcome"
+  failure_analysis: "Diagnosing degradation or failure from symptoms and data"
+  quantitative: "Estimating or reasoning with numbers, units and orders of magnitude"
+  safety_cost: "Safety, thermal stability, cost, supply or sustainability considerations"
+  comparison: "Comparing materials, chemistries or strategies"
+  other: "Anything else a battery materials scientist would ask"
+
+answer_types: [OPEN, CLOSED]
+phrase_types: [free-form, rephrased, framed]
+
+task_formats:
+  positive: [instruction_response, multi_turn_chat, technical_writing, multi_doc_synthesis, grounded_ideation]
+  negative: [false_premise, contradiction_detection, insufficient_evidence, error_spotting, flawed_methods_critique, implausible_idea_critique]
+
+fact_categories: [structure, electrochemical, thermal, mechanical, synthesis, characterization, degradation, cost_safety]
+comparison_directions: [improves, unchanged, worsens]
+claim_pair_categories: [paraphrase, contradiction]
+claim_pair_subsets: [swap, numeric, mechanism, entity]
+dpo_error_types:
+  - wrong_mechanism
+  - wrong_magnitude_or_units
+  - ignored_tradeoff
+  - fabricated_evidence
+  - overclaiming
+  - thermodynamically_impossible
