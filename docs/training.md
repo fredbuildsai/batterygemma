@@ -3,7 +3,7 @@
 This is the practical guide to stage 10 (train) and everything downstream of it: turning an exported
 JSONL dataset into a LoRA adapter, then a GGUF file you can run locally, then (optionally) a model
 published to Hugging Face. For *why* the pipeline is shaped this way, see the referenced ADRs in
-[architecture.md](architecture.md#9-architecture-decisions). For the license-gate mechanics that show up
+[architecture](architecture/09-architecture-decisions.md). For the license-gate mechanics that show up
 throughout this doc, see [licensing.md](licensing.md).
 
 ---
@@ -92,7 +92,7 @@ Both read their hyperparameters from `configs/train_cpt.yaml` / `configs/train_s
 1.8% of a single pass, deliberately small. For a proof-of-concept, this is the right regime: memory and
 step-time were measured live at 30 steps (see [the numbers](#what-to-expect-timing-and-memory) below) before
 committing to anything longer, and CPT's loss curve (like any pretraining) drops fastest early and flattens
-— see [ADR-009](architecture.md#adr-009-mlx-model-selection-through-three-real-failures) for the full
+— see [ADR-009](architecture/09-architecture-decisions.md#adr-009-mlx-model-selection-through-three-real-failures) for the full
 memory-hang story this default was chosen *around*. Push `max_steps` up once you've confirmed the small run
 behaves as expected; going past one full epoch on a fixed corpus is where diminishing returns (and eventual
 overfitting to specific chunks) start to matter, not before.
@@ -145,7 +145,7 @@ than Unsloth's own `get_peft_model` (used for a fresh LoRA), and that mismatch c
 training pushed the optimizer out of range almost immediately. This is flagged here rather than silently
 left for the next person to rediscover — **CPT-only and SFT-only (from base) both train cleanly**; CPT→SFT
 chaining needs further numerical investigation before it's trustworthy. See
-[Risks and Technical Debt](architecture.md#11-risks-and-technical-debt).
+[Risks and Technical Debt](architecture/11-risks-and-technical-debt.md).
 
 ---
 
@@ -214,7 +214,7 @@ community MLX quant) fixed it.
 
 `bg train export-gguf` always produces the file, even from an adapter trained on non-open-licensed material,
 and just prints a warning in that case. **Uploading** is the actual point of enforcement — see
-[licensing.md](licensing.md#the-hard-gate-is-at-publish-time-not-at-export-gguf) for why the gate sits there
+[licensing.md](licensing.md#design-three-checkpoints-one-hard-gate) for why the gate sits there
 and not here.
 
 ---

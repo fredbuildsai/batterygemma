@@ -7,11 +7,11 @@ a license that actually permits redistribution — and the pipeline has *two* in
 non-redistributable document can end up in the training set anyway:
 
 1. **The automated pipeline gets it wrong** — a source API misreports a license, or a rare edge case in
-   `screen/license.py`'s normalization slips through.
+   `corpusforge.screen.license`'s normalization slips through.
 2. **A document bypasses the pipeline entirely** — this project's own database had exactly this: two
    commercial, copyrighted books (*Handbook of Batteries, 3rd Edition* and *Physical Chemistry of
    Polyelectrolytes*) added directly via `bg add-local`, which accepts any local PDF regardless of license
-   for personal research use, and which therefore never passed through `screen/license.py`'s allow/flag/deny
+   for personal research use, and which therefore never passed through `corpusforge.screen.license`'s allow/flag/deny
    gate at all.
 
 Both books had already contributed thousands of chunks, Q&A pairs, and DPO examples to the exported training
@@ -53,7 +53,7 @@ flowchart TD
 Three places *warn and offer to fix it*; **exactly one place actually refuses**: `bg train push-to-hub`.
 Everything before that is advisory, because training on restricted material for your own local/private use
 is legitimate — it's *redistributing* it that isn't. See
-[ADR-010](architecture.md#adr-010-license-gate-the-hard-block-is-at-publish-not-at-gguf-export) for why the
+[ADR-010](architecture/09-architecture-decisions.md#adr-010-license-gate--the-hard-block-is-at-publish-not-at-gguf-export) for why the
 gate specifically sits at the publish step and nowhere earlier, including an explicit design correction made
 mid-session (an earlier version of this gate blocked GGUF creation itself, which was the wrong place).
 
@@ -79,7 +79,7 @@ row indices came from it:
 This is the format the user explicitly asked for: `{doi: {"chunks": [row indices...]}}`. It's built once, in
 `export/unsloth_jsonl.py::AttributionManifest`, and reused for three different jobs downstream:
 
-1. **Classification** (`export/licensing.py::classify_export`) — evaluate every source's license against the
+1. **Classification** (`corpusforge.export.licensing::classify_export`) — evaluate every source's license against the
    same allow/flag lists ingestion uses (`configs/sources.yaml`), so a document's public-release status is
    judged identically whether it's being screened on the way in or checked on the way out.
 2. **Filtering** (`restricted_row_indices_for_file` + `write_filtered_jsonl`) — turn "these doc_ids are

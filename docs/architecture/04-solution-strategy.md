@@ -1,0 +1,12 @@
+# 4. Solution Strategy
+
+| Goal | Strategy |
+|---|---|
+| Handle tens of thousands of LLM calls against free, rate-limited APIs | A quota-aware router (`llmrouter_free.router`, its own package) with per-deployment/rate-group cooldowns, automatic failover across an ordered chain of deployments, response caching by prompt hash, and — as of the current design — a local Ollama deployment appended to every chain as a last-resort, no-rate-limit fallback. |
+| Never lose progress on a multi-hour, interruptible pipeline | Every annotate/generate/judge operation is wrapped in a resumable task (`corpusforge.annotate.tasks`, `GenTask` table; annotate stages run through `corpusforge.runner`) keyed by a stable idempotency key (`"<task_type>:<chunk_or_row_id>"`); re-running a stage is always safe. |
+| Avoid the "same model grades its own homework" problem | The judge route explicitly excludes the generator's model family (`exclude_families`); cross-family judging is preserved even under fallback (see ADR-007). |
+| Keep the schema portable beyond SQLite | SQLAlchemy 2.0 declarative models restricted to portable column types (`String`, `Text`, `Integer`, `Float`, `Boolean`, `JSON`, `DateTime`) plus Alembic migrations. |
+| Produce statistically meaningful data, not a handful of examples | `configs/generation.yaml` encodes explicit per-chunk/per-paper/per-cluster generation quotas, balance ratios (positive/negative, closed yes/no, claim-pair paraphrase/contradiction), and minimum per-cell coverage targets, checked by `bg stats`. |
+| Reuse the machinery for other domains | Split into three packages along the seams that were already clean (router, pipeline, domain). The domain injects prompts/schemas/row builders (`ChunkTaskSpec`), extra CPT rows (`ExtraCptRow`) and settings; the packages contain no domain text. See [ADR-013](09-architecture-decisions.md#adr-013-split-into-three-packages). |
+| Prove each stage actually works | Every stage has unit tests built around a real bug found while building it (see §9), and — where practical — a live smoke run against real corpus data before being called done. |
+| Train on Apple Silicon without CUDA | Delegate to Unsloth's internal MLX backend rather than assuming the CUDA path; three real incompatibilities (VLM default load path, `assistant_only_loss` dataset shape, missing chat-template `{% generation %}` markers) were found and worked around via live runs, documented in `train/sft.py`'s module docstring. |

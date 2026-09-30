@@ -223,3 +223,6 @@ __marimo__/
 data/
 *.db
 outputs/
+
+# uv.lock pins the sibling-checkout path sources used for development; not portable
+uv.lock
