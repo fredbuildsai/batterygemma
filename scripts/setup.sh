@@ -93,6 +93,7 @@ else
   echo "uv not found - installing it with the official installer ($UV_INSTALLER_URL)"
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '+ curl -LsSf %s | sh\n' "$UV_INSTALLER_URL"
+    # shellcheck disable=SC2016  # literal text for the dry-run display
     printf '+ export PATH="$HOME/.local/bin:$PATH"\n'
   else
     command -v curl >/dev/null 2>&1 || { echo "error: curl is required to install uv" >&2; exit 1; }
