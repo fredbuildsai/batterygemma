@@ -26,8 +26,8 @@ For the full arc42 architecture writeup (building blocks, runtime views, decisio
 
 ## What the fine-tuning changes: a first look
 
-Same question, three models. These are the **complete, unedited answers** from this project's own runs (the files are
-also in `data/eval/model_comparison/` and `data/eval/ontology_harness_v3/` when you run the pipeline locally).
+Same question, three models. These are the **complete, unedited answers** from this project's own runs. (The raw eval files live under `data/`, which
+is not committed to this repository, so the answers are reproduced here in full.)
 
 > **Q: What happens to NMC811 cathodes when charged above 4.2 V?**
 
