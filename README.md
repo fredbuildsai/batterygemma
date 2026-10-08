@@ -24,6 +24,33 @@ For the full arc42 architecture writeup (building blocks, runtime views, decisio
 
 ---
 
+## What the fine-tuning changes: a first look
+
+Same question, three models (outputs from this project's own runs, trimmed; full text in
+[`data/eval/model_comparison/comparison.md`](data/eval/model_comparison/comparison.md) when you run the pipeline locally):
+
+> **Q: What happens to NMC811 cathodes when charged above 4.2 V?**
+
+| Model | Answer (excerpt) |
+|---|---|
+| **Base** Gemma 4 E2B, no fine-tuning | "Phase transitions: high voltage can trigger undesirable phase changes ... **Lithium intercalation:** when the cell is pushed to higher voltages, excess lithium ions are forced into the NMC811 crystal lattice ..." Fluent and generic - and the second claim is backwards (charging *removes* lithium from the lattice). |
+| **After continued pretraining** (CPT on the literature) | "**Transition metal migration:** NMC materials contain Ni, Mn, Co. High voltages can accelerate the migration of these metal ions ... **SEI breakdown** ... continuous consumption of electrolyte and further degradation of the cathode structure." Uses the field's vocabulary and mechanisms, but still says "undesirable phase changes" without naming them. |
+| **After CPT + SFT** (instruction tuning on generated Q&A) | "**Transition metal dissolution:** high voltage can cause the Mn and Co ions to dissolve out of the lattice ... irreversible capacity fade ... [thermal runaway risk rises] if the cell is subjected to an external trigger." Shorter and more carefully hedged. |
+
+> **Q: Classify NMC811 and explain where a lithium-ion battery sits relative to a graphite electrode and the cell** (ontology-grounded prompt)
+
+The base model restates the supplied ontology definitions almost verbatim; the CPT model states the relationships
+directly ("the graphite electrode serves as the anode substrate for lithium intercalation ... LiNi0.8Mn0.1Co0.1O2 is the
+active material of the cathode") - though it also slips, calling a lithium-ion cell one with a "lithium metal anode".
+
+**Honest reading:** the tuned models move toward domain vocabulary and mechanisms, but on these hand-picked prompts they
+do **not yet clearly beat the base model**, and none names the H2->H3 phase transition that the training papers
+describe. Single examples prove little; the real measure is the held-out gold benchmark
+(`bg eval build-gold`, `bg eval run`), which reports accuracy with confidence intervals - see
+[Training and publishing](#training-and-publishing).
+
+---
+
 ## Pain points this solves
 
 | Pain point | What this project does about it |
