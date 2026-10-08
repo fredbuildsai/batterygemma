@@ -26,22 +26,174 @@ For the full arc42 architecture writeup (building blocks, runtime views, decisio
 
 ## What the fine-tuning changes: a first look
 
-Same question, three models (outputs from this project's own runs, trimmed; full text in
-[`data/eval/model_comparison/comparison.md`](data/eval/model_comparison/comparison.md) when you run the pipeline locally):
+Same question, three models. These are the **complete, unedited answers** from this project's own runs (the files are
+also in `data/eval/model_comparison/` and `data/eval/ontology_harness_v3/` when you run the pipeline locally).
 
 > **Q: What happens to NMC811 cathodes when charged above 4.2 V?**
 
-| Model | Answer (excerpt) |
-|---|---|
-| **Base** Gemma 4 E2B, no fine-tuning | "Phase transitions: high voltage can trigger undesirable phase changes ... **Lithium intercalation:** when the cell is pushed to higher voltages, excess lithium ions are forced into the NMC811 crystal lattice ..." Fluent and generic - and the second claim is backwards (charging *removes* lithium from the lattice). |
-| **After continued pretraining** (CPT on the literature) | "**Transition metal migration:** NMC materials contain Ni, Mn, Co. High voltages can accelerate the migration of these metal ions ... **SEI breakdown** ... continuous consumption of electrolyte and further degradation of the cathode structure." Uses the field's vocabulary and mechanisms, but still says "undesirable phase changes" without naming them. |
-| **After CPT + SFT** (instruction tuning on generated Q&A) | "**Transition metal dissolution:** high voltage can cause the Mn and Co ions to dissolve out of the lattice ... irreversible capacity fade ... [thermal runaway risk rises] if the cell is subjected to an external trigger." Shorter and more carefully hedged. |
+<details>
+<summary><b>Base Gemma 4 E2B (no fine-tuning)</b> - full answer</summary>
 
-> **Q: Classify NMC811 and explain where a lithium-ion battery sits relative to a graphite electrode and the cell** (ontology-grounded prompt)
+Charging NMC811 cathodes above their normal operating voltage (typically 4.2V for standard Li-ion cells) introduces significant stress and potential instability to the material. This process can lead to several undesirable chemical and physical changes, primarily increasing the risk of damage and thermal runaway.
 
-The base model restates the supplied ontology definitions almost verbatim; the CPT model states the relationships
-directly ("the graphite electrode serves as the anode substrate for lithium intercalation ... LiNi0.8Mn0.1Co0.1O2 is the
-active material of the cathode") - though it also slips, calling a lithium-ion cell one with a "lithium metal anode".
+Here is a breakdown of what happens to NMC811 cathodes when charged above 4.2V:
+
+
+### 1. Structural Instability and Phase Change
+
+The primary effect of overcharging is the alteration of the crystal structure of the cathode material:
+
+* **Lithium Intercalation:** When the cell is pushed to higher voltages, excess lithium ions are forced into the NMC811 crystal lattice beyond the stable configuration. This creates internal strain and destabilizes the structure.
+* **Phase Transitions:** High voltage can trigger undesirable phase changes within the NMC811 structure. These phase changes can lead to the formation of metastable phases that are unstable and prone to further decomposition.
+* **Crystallographic Damage:** The excessive internal stress can cause micro-cracking and damage to the overall material structure, reducing its capacity and structural integrity over time.
+
+
+### 2. Increased Risk of Side Reactions and Degradation
+
+Beyond the structural changes, charging above 4.2V accelerates degradation processes:
+
+* **Electrolyte Decomposition:** High voltages can cause the organic electrolyte to break down, leading to the formation of flammable byproducts and gaseous decomposition.
+* **Oxidation:** The high potential puts the cathode material under extreme oxidative stress, accelerating irreversible chemical degradation.
+
+
+### 3. Lithium Plating
+
+If the charging is rapid or the voltage is pushed significantly above the stable range, there is an increased potential for **lithium plating**.
+
+* **Formation of Lithium Metal:** Instead of smoothly intercalating into the structure, lithium ions may deposit on the surface or within defects, forming unstable lithium metal deposits. This is particularly dangerous as lithium metal deposits are highly reactive and can act as internal short circuits.
+
+
+### 4. Increased Thermal Runaway Risk (The Major Hazard)
+
+The combination of structural instability, internal stress, and the presence of unstable lithium deposits dramatically increases the risk of thermal runaway:
+
+* **Energy Release:** When the cathode material or the electrolyte decomposes at high voltages, it releases significant amounts of heat and flammable gases.
+* **Self-Heating:** The unstable lithium deposits can act as internal short circuits, leading to uncontrolled exothermic reactions (thermal runaway).
+* **Cell Failure:** This runaway reaction can rapidly spread heat through the cell, leading to catastrophic failure, fire, and explosion.
+
+***
+
+**In summary, while lithium-ion cells are designed to handle specific voltage ranges, charging NMC811 cathodes above 4.2V pushes the material into an unstable state, increasing the likelihood of structural damage, chemical degradation, and, most critically, thermal runaway.**
+
+For safe operation, battery management systems (BMS) monitor the voltage and temperature precisely to prevent the cell from being subjected to these dangerous overvoltage conditions.
+
+</details>
+
+<details>
+<summary><b>After continued pretraining (CPT on the literature)</b> - full answer</summary>
+
+Charging NMC811 cathodes above their typical operational voltage (such as 4.2V) puts significant stress on the material and the surrounding electrolyte, leading to several detrimental chemical and physical changes.
+
+Here is a detailed breakdown of what happens when NMC811 cathodes are charged above 4.2V:
+
+
+### 1. Structural and Chemical Degradation
+
+**a. Solid-Electrolyte Interphase (SEI) Breakdown:**
+The SEI layer is a thin, protective layer that forms on the anode surface (and interacts with the cathode during cycling). When the cell is subjected to excessive voltage, the electrolyte decomposition products can react more aggressively with the NMC material, leading to the breakdown or instability of the SEI. This instability can lead to continuous consumption of electrolyte and further degradation of the cathode structure.
+
+**b. Phase Change and Structural Damage:**
+The high voltage can induce undesirable phase changes within the NMC material structure. This stress can cause mechanical damage to the crystal lattice of the cathode material, leading to structural defects. Over repeated high-voltage cycles, this leads to irreversible capacity fade (loss of storage capacity) and eventual structural failure.
+
+**c. Transition Metal Migration:**
+NMC materials contain transition metals (Nickel, Manganese, Cobalt). High voltages can accelerate the migration of these metal ions, which can alter the stoichiometry of the cathode material and change its overall stability.
+
+
+### 2. Safety Risks (The Primary Concern)
+
+The most critical consequence of overcharging a Li-ion battery is the increased risk of thermal runaway and physical failure.
+
+**a. Lithium Plating:**
+When a cell is charged too quickly or pushed past its safe voltage limits, lithium ions can deposit (plate) onto the anode surface (or the interface layer). This formation of metallic lithium is highly unstable and can lead to internal short circuits.
+
+**b. Formation of Lithium Dendrites:**
+If lithium plating occurs rapidly, it can form needle-like structures called dendrites. These dendrites penetrate the separator and eventually through the cathode structure, causing an internal short circuit. This internal short circuit generates excessive heat, leading to an uncontrollable exothermic reaction (thermal runaway) and potentially fire or explosion.
+
+**c. Gas Evolution:**
+At excessively high potentials, side reactions can occur between the cathode material and the electrolyte, generating flammable gases within the cell, further escalating the risk of thermal instability.
+
+***
+
+
+### Summary Table
+
+| Condition | Effect on NMC811 Cathode | Consequence |
+| :--- | :--- | :--- |
+| **Charge > 4.2V** | Stress on the cathode structure and SEI layer. | Capacity fade and irreversible degradation. |
+| **Charge > 4.2V** | Increased risk of lithium plating on anode/interface. | Internal short circuit risk. |
+| **Charge > 4.2V (and high current)** | Increased risk of dendrite formation. | Short circuit, overheating, thermal runaway/fire. |
+
+**In conclusion, charging NMC811 cathodes above 4.2V accelerates degradation and significantly increases the risk of catastrophic failure (like thermal runaway) due to the formation of unstable lithium metal deposits and structural breakdown.** Therefore, proper Battery Management Systems (BMS) are designed specifically to monitor and strictly prevent overcharging above safe limits.
+
+</details>
+
+<details>
+<summary><b>After CPT + SFT (instruction tuning on generated Q&A)</b> - full answer</summary>
+
+When NMC811 cathodes are charged above 4.2V (or higher), they experience degradation and risk, which is particularly relevant in Li-ion batteries.
+
+Here is a breakdown of what happens:
+
+
+### 1. Structural Degradation and Loss of Capacity
+
+The most immediate consequence of overcharging is the breakdown of the cathode material's structure and the generation of degradation products.
+
+* **Transition Metal Dissolution:** High voltage can cause the Mn and Co ions to dissolve out of the lattice. This leads to the formation of unwanted phases (e.g., MnO2 or Mn oxides) and the loss of active material, which directly translates to irreversible capacity fade.
+* **Phase Change:** NMC materials are complex oxides. Overcharging can induce unwanted phase changes, which structurally alter the material and decrease its ability to store charge.
+
+
+### 2. Safety Concerns (Increased Risk)
+
+While capacity loss is the primary chemical concern, charging above 4.2V increases the risk of thermal runaway if the cell is subjected to external stress.
+
+* **Increased Reactivity:** Highly charged materials become more unstable. If the cell is subjected to an external trigger (like an internal short circuit or external thermal stress), the degradation products (which are often highly reactive) can start the self-heating chain reaction.
+* **Physical Instability:** Overcharging can alter the material's physical structure, making it more susceptible to particles expanding and forming a highly flammable carbonate solid electrolyte interphase (SEI), thus increasing the risk of thermal runaway.
+
+
+### Summary
+
+In short: **Charging NMC811 above 4.2V causes irreversible structural and chemical degradation, leading to permanent capacity loss and increasing the risk of thermal instability.**
+
+</details>
+
+> **Q: Classify NMC811 and explain, in terms of the ontology, where a lithium ion battery sits relative to a graphite electrode and the overall battery cell.** (ontology-grounded prompt)
+
+<details>
+<summary><b>Base Gemma 4 E2B (no fine-tuning)</b> - full answer</summary>
+
+## Ontology Classification
+- lithium ion battery: lithium ion battery is a kind of lithium battery is a kind of battery cell is a kind of battery - "cell containing a non-aqueous electrolyte and a negative electrode of lithium or containing lithium"
+- graphite electrode: graphite electrode is a kind of active electrode is a kind of electrode is a kind of electrochemical component - "an electrode which is chemically altered by the electrode reaction"
+- battery cell: battery cell is a kind of battery - "one or more cells fitted with devices necessary for use, for example case, terminals, marking and protective devices"
+- lithium nickel manganese cobalt oxide 811: lithium nickel manganese cobalt oxide 811 is a kind of lithium nickel manganese cobalt oxide is a kind of mixed metal oxide compound - "a chemical compound consisting of lithium, nickel, manganese, cobalt, and oxygen atoms in an oxide structure"
+
+
+## Mechanism / Explanation
+The lithium nickel manganese cobalt oxide 811 is classified as a mixed metal oxide. A lithium ion battery is a kind of battery cell, which is a basic functional unit consisting of an assembly of electrodes, electrolyte, container, terminals, and usually separators, that is a source of electric energy obtained by direct conversion of chemical energy. This lithium ion battery is constituted by one or more cells fitted with devices necessary for use, such as a case, terminals, marking, and protective devices, classifying it as a battery. In terms of composition, the lithium nickel manganese cobalt oxide 811 serves as the material for the active electrode, which is an electrode that is chemically altered by the electrode reaction. Specifically, the lithium nickel manganese cobalt oxide 811 forms the active electrode in the lithium ion battery. The graphite electrode is an electrode, which is an electronically conductive part in electric contact with a medium of lower electronic conductivity and is intended to perform one or more of the functions of emitting charge carriers to or receiving charge carriers from that medium or to establish an electric field in that medium. The lithium ion battery is an assembly of electrodes and the electrolyte, and the lithium nickel manganese cobalt oxide 811 forms the material of the active electrode, which is one of the components within the overall battery cell.
+
+</details>
+
+<details>
+<summary><b>After CPT with ontology rows</b> - full answer</summary>
+
+## Ontology Classification
+- lithium ion battery: lithium ion battery is a kind of lithium battery is a kind of battery cell is a kind of battery - "cell containing a non-aqueous electrolyte and a negative electrode of lithium or containing lithium"
+- graphite electrode: graphite electrode is a kind of active electrode is a kind of electrode is a kind of electrochemical component - "an electrode which is chemically altered by the electrode reaction"
+- battery cell: battery cell is a kind of battery - "one or more cells fitted with devices necessary for use, for example case, terminals, marking and protective devices"
+- lithium nickel manganese cobalt oxide 811: lithium nickel manganese cobalt oxide 811 is a kind of lithium nickel manganese cobalt oxide is a kind of mixed metal oxide compound - "a chemical compound consisting of lithium, nickel, manganese, cobalt, and oxygen atoms in an oxide structure"
+
+
+## Mechanism / Explanation
+The lithium ion battery is a class of battery cell, defined by its configuration consisting of a lithium metal anode, a cathode, an electrolyte, a separator, and a current collector. The active component of this battery cell is the assembly of electrodes that stores and releases electrical charge through electrochemical reactions. Within the overall architecture of a lithium ion battery, a graphite electrode serves as the working medium for the anode, specifically as the current collector and the substrate for lithium intercalation/deintercalation reactions. For example, in a lithium ion battery cell, the graphite electrode is an example of an electrode, which is an electrochemical component of the cell. The material LiNi$_{0.8}$Mn$_{0.1}$Co$_{0.1}$O$_{2}$ is used as the active material in the cathode of a lithium ion battery. It is classified as a mixed metal oxide, which is often employed to construct the cathode of a lithium ion battery cell. The NMC811 cathode, in this context, is therefore an active electrode, which is an electrochemical component of the overall battery cell.
+
+</details>
+
+**What to notice**
+- Base: fluent and generic; it says excess lithium is "forced into" the lattice at high charge, which is backwards (charging *removes* lithium).
+- CPT: uses the field's vocabulary and mechanisms (transition-metal migration, SEI breakdown, gas evolution) but still says "undesirable phase changes" without naming them.
+- CPT + SFT: shorter and more carefully hedged, but drifts into a muddled "carbonate SEI" sentence.
+- Ontology question: the base model restates the supplied definitions almost verbatim; the CPT model states the relationships directly, but slips by calling a lithium-ion cell one with a "lithium metal anode".
 
 **Honest reading:** the tuned models move toward domain vocabulary and mechanisms, but on these hand-picked prompts they
 do **not yet clearly beat the base model**, and none names the H2->H3 phase transition that the training papers
