@@ -25,3 +25,5 @@ jobs:
         run: shellcheck scripts/setup.sh
       - name: Test
         run: uv run --no-sync pytest -q
+      - name: Test the demos
+        run: PYTHONPATH=demos/phase_transition_agent uv run --no-sync pytest -q demos

@@ -1,0 +1,28 @@
+# Editable "domain knowledge" of the demo agent: how a question is turned into evidence searches.
+# No Python needs to change to add a topic. A rule fires when ANY `triggers` phrase occurs in the question
+# (case-insensitive). Its `search` terms are looked up in the extracted-facts table; `must_mention` are terms that, if
+# the retrieved evidence contains them, the final answer is required to cover (the verify step enforces this). Alternatives are written a|b|c.
+
+materials:            # question phrase -> terms that also identify the material in an evidence sentence
+  nmc811: ["nmc811", "ni-rich", "nickel-rich", "high-nickel", "layered oxide", "NCM811", "LiNi0.8"]
+  nmc: ["nmc", "ncm", "layered oxide", "ni-rich"]
+  lfp: ["lfp", "lifepo4", "olivine"]
+
+rules:
+  - name: high-voltage behaviour of layered oxides
+    triggers: ["above 4.2", "above 4.3", "above 4.5", "high voltage", "high-voltage", "overcharge", "upper cutoff", "highly delithiated", "high state of charge"]
+    search: ["h2", "h3", "h2-h3", "phase transition", "phase transformation", "c-axis", "c axis", "lattice c",
+             "lattice shrinkage", "microcrack", "oxygen release", "lattice oxygen", "surface reconstruction",
+             "rock-salt", "rock salt", "high voltage", "high state of charge", "delithiat"]
+    must_mention: ["H2", "H3", "c-axis|c-direction|lattice c|c lattice", "microcrack|cracking|crack", "oxygen"]
+
+  - name: degradation mechanisms in general
+    triggers: ["capacity fade", "degradation", "cycle life", "why does", "fail"]
+    search: ["capacity fade", "degradation", "microcrack", "transition metal dissolution", "cation mixing",
+             "surface reconstruction", "impedance growth", "cei", "sei"]
+    must_mention: []
+
+  - name: thermal safety
+    triggers: ["thermal runaway", "safety", "exotherm"]
+    search: ["thermal runaway", "onset temperature", "oxygen release", "exothermic", "self-heating"]
+    must_mention: ["oxygen"]

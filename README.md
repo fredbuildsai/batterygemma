@@ -201,6 +201,11 @@ describe. Single examples prove little; the real measure is the held-out gold be
 (`bg eval build-gold`, `bg eval run`), which reports accuracy with confidence intervals - see
 [Training and publishing](#training-and-publishing).
 
+**Can a harness fix the gap?** Yes - see the self-contained [phase-transition agent demo](demos/phase_transition_agent/README.md):
+a small agent that looks the topic up in the extracted facts, dictates the answer's voice from an editable policy file and
+checks the result against the evidence makes every model, including the 2B base, name the H1→M→H2→H3 sequence with
+citations.
+
 ---
 
 ## Pain points this solves
