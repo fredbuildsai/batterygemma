@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from corpusforge.models import Chunk, Document, File
 
 from batterygemma.db.models import QA, DPOPair, Negative
